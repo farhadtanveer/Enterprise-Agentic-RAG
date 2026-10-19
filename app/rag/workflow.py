@@ -1,4 +1,5 @@
 import logging
+from pathlib import PureWindowsPath
 from typing import Literal
 from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
@@ -149,7 +150,9 @@ Question: {state['question']}\n\nPrivate KB:\n{context}
         src = d.metadata.get("source", "Private KB")
         if src not in seen:
             seen.add(src)
-            citations.append({"title": src.split("/")[-1], "url": "", "type": "private_kb"})
+            # PureWindowsPath parses both separators on any OS, so docs ingested
+            # on Windows still show a clean filename when served from Linux.
+            citations.append({"title": PureWindowsPath(src).name, "url": "", "type": "private_kb"})
     return {"answer": answer, "source_used": "private_kb", "citations": citations, "trace": add_trace(state, "Answer generation → PRIVATE KB")}
 
 def generate_from_web(state: AgentState):
