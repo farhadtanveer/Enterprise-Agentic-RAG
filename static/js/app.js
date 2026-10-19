@@ -16,11 +16,23 @@ function escapeHtml(s = "") {
 function formatText(s = "") {
   return escapeHtml(s).replace(/\n/g, "<br>");
 }
+// Only http(s) may become a link; anything else (e.g. javascript:) renders as text.
+function safeHref(url = "") {
+  return /^https?:\/\//i.test(url) ? url : "";
+}
 function addMessage(role, text, source = "", citations = []) {
   const wrap = document.createElement("div");
   wrap.className = `message ${role}`;
   const citeHtml = citations.length
-    ? `<div class="citations"><strong>Sources</strong><br>${citations.map((c) => (c.url ? `<a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.title)}</a>` : escapeHtml(c.title))).join("<br>")}</div>`
+    ? `<div class="citations"><strong>Sources</strong><br>${citations
+        .map((c) => {
+          const href = safeHref(c.url);
+          const label = escapeHtml(c.title);
+          return href
+            ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${label}</a>`
+            : label;
+        })
+        .join("<br>")}</div>`
     : "";
   wrap.innerHTML = `<div class="avatar">AI</div><div class="bubble">${formatText(text)}${source ? `<div class="answer-source">Source: ${escapeHtml(source)}</div>` : ""}${citeHtml}</div>`;
   chat.appendChild(wrap);
