@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from app.api.routes import router
-from app.core.config import get_settings, BASE_DIR, validate_admin_key
+from app.core.config import get_settings, BASE_DIR, validate_admin_key, validate_chat_security
 from app.core.logging import configure_logging
 from app.services.audit import init_db
 
@@ -12,6 +12,7 @@ from app.services.audit import init_db
 configure_logging()
 settings = get_settings()
 validate_admin_key(settings)
+validate_chat_security(settings)
 init_db()
 
 

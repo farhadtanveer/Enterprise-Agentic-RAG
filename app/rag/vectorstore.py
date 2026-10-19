@@ -1,3 +1,4 @@
+import hashlib
 import time
 from pinecone import Pinecone , ServerlessSpec
 from langchain_openai import OpenAIEmbeddings
@@ -121,6 +122,26 @@ def get_retriever():
 
 
 
+def _chunk_id(chunk) -> str:
+    # Deterministic: re-ingesting unchanged content upserts over itself.
+    # Source is part of the hash so identical text in different documents
+    # can never collide. start_index disambiguates repeated chunks within
+    # one document.
+    source = str(chunk.metadata.get("source", ""))
+    start = str(chunk.metadata.get("start_index", ""))
+    return hashlib.sha256(f"{source}\x00{start}\x00{chunk.page_content}".encode("utf-8")).hexdigest()
+
+
 def add_documents(chunks):
     store = get_vectorstore()
-    return store.add_documents(chunks)
+    # Replace semantics: wipe each source's existing vectors before adding,
+    # so a changed re-upload doesn't leave stale chunks behind.
+    sources = {str(c.metadata.get("source", "")) for c in chunks}
+    for src in sources:
+        if src:
+            store.index.delete(
+                filter={"source": {"$eq": src}},
+                namespace=settings.pinecone_namespace,
+            )
+    ids = [_chunk_id(c) for c in chunks]
+    return store.add_documents(chunks, ids=ids)
