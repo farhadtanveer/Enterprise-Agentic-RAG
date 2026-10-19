@@ -79,6 +79,17 @@ def after_kb(state: AgentState) -> Literal["generate_from_kb", "search_web"]:
 def search_web(state: AgentState):
     result = web_search_tool().invoke({"query": state["current_query"]})
     lines, citations = [], []
+    # langchain-tavily 0.2.x returns {"error": <exc>} instead of raising.
+    # Treat that as a failed search, never as "no results".
+    if isinstance(result, dict) and result.get("error"):
+        error = result["error"]
+        logger.warning("Tavily search failed: %s", error)
+        return {
+            "web_results": "",
+            "citations": [],
+            "source_used": "web",
+            "trace": add_trace(state, f"Web fallback → TAVILY ERROR: {error}"),
+        }
     if isinstance(result, dict):
         if result.get("answer"):
             lines.append("Search answer: " + result["answer"])
