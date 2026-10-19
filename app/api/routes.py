@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException, Header
 from pydantic import BaseModel, Field
@@ -9,6 +10,7 @@ from app.services.audit import write_audit
 
 router = APIRouter(prefix="/api")
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=2, max_length=3000)
@@ -35,7 +37,8 @@ def chat(payload: ChatRequest):
         }
 
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("chat request failed")
+        raise HTTPException(status_code=500, detail="Internal error") from exc
 
 
 
