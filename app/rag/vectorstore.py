@@ -73,9 +73,13 @@ def ensure_index():
             current_dimension = index_info.get("dimension")
 
         if current_dimension is not None and current_dimension != desired_dimension:
-            pc.delete_index(name=settings.pinecone_index_name)
-            while settings.pinecone_index_name in [x["name"] for x in pc.list_indexes()]:
-                time.sleep(1)
+            # Never delete existing data automatically. Fail loudly instead.
+            raise RuntimeError(
+                f"Pinecone index '{settings.pinecone_index_name}' has dimension {current_dimension}, "
+                f"but embedding model '{settings.embedding_model}' requires {desired_dimension}. "
+                "Existing vectors were NOT touched. Fix EMBEDDING_MODEL, or manually delete the "
+                "index (Pinecone console or pc.delete_index) and re-run ingestion."
+            )
 
     if settings.pinecone_index_name not in [x["name"] for x in pc.list_indexes()]:
         pc.create_index(
@@ -84,7 +88,13 @@ def ensure_index():
             metric="cosine",
             spec=ServerlessSpec(cloud="aws", region="us-east-1"),
         )
+        deadline = time.monotonic() + settings.index_ready_timeout_seconds
         while not pc.describe_index(settings.pinecone_index_name).status["ready"]:
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"Pinecone index '{settings.pinecone_index_name}' not ready after "
+                    f"{settings.index_ready_timeout_seconds}s"
+                )
             time.sleep(1)
 
     return pc.Index(settings.pinecone_index_name)
