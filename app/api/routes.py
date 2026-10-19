@@ -1,4 +1,5 @@
 import logging
+import secrets
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException, Header
 from pydantic import BaseModel, Field
@@ -44,7 +45,10 @@ def chat(payload: ChatRequest):
 
 @router.post("/ingest")
 async def ingest(file: UploadFile = File(...), x_admin_key: str = Header(default="")):
-    if x_admin_key != settings.admin_api_key:
+    # encode() so odd header bytes can't raise TypeError inside compare_digest
+    if not secrets.compare_digest(
+        x_admin_key.encode("utf-8"), settings.admin_api_key.encode("utf-8")
+    ):
         raise HTTPException(status_code=401, detail="Invalid admin key")
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in SUPPORTED:
