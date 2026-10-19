@@ -1,4 +1,6 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import PureWindowsPath
 from typing import Literal
 from langchain_openai import ChatOpenAI
@@ -23,6 +25,7 @@ def llm():
             model=settings.openai_model,
             temperature=0,
             api_key=settings.openai_api_key,
+            timeout=settings.llm_timeout_seconds,
         )
     return _llm
 
@@ -42,6 +45,22 @@ def web_search_tool():
 
 def add_trace(state: AgentState, message: str):
     return [*state.get("trace", []), message]
+
+# TavilySearch (0.2.x) exposes no timeout parameter, so the deadline lives
+# here: 2 workers bound the blast radius of hung searches. A timed-out
+# thread cannot be interrupted, but it strands in this pool instead of
+# pinning a request threadpool thread. Errors surface as {"error": ...},
+# which search_web already handles (see M1).
+_search_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tavily")
+
+def tavily_search(query: str):
+    future = _search_executor.submit(web_search_tool().invoke, {"query": query})
+    try:
+        return future.result(timeout=settings.web_search_timeout_seconds)
+    except FutureTimeoutError:
+        future.cancel()
+        logger.warning("Tavily search exceeded %ss timeout", settings.web_search_timeout_seconds)
+        return {"error": f"Tavily search exceeded {settings.web_search_timeout_seconds}s timeout"}
 
 def route_question(state: AgentState):
     router = llm().with_structured_output(RouteDecision, method="json_mode")
@@ -78,7 +97,7 @@ def after_kb(state: AgentState) -> Literal["generate_from_kb", "search_web"]:
     return "generate_from_kb" if state["kb_grade"] == "good" else "search_web"
 
 def search_web(state: AgentState):
-    result = web_search_tool().invoke({"query": state["current_query"]})
+    result = tavily_search(state["current_query"])
     lines, citations = [], []
     # langchain-tavily 0.2.x returns {"error": <exc>} instead of raising.
     # Treat that as a failed search, never as "no results".

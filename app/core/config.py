@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     top_k: int = 4
     max_retries: int = 1
     index_ready_timeout_seconds: int = 120
+    llm_timeout_seconds: int = 60
+    web_search_timeout_seconds: int = 30
     admin_api_key: str = DEFAULT_ADMIN_KEY
     audit_db_path: str = str(BASE_DIR / "data" / "audit.db")
     upload_dir: str = str(BASE_DIR / "uploads")
