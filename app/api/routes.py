@@ -1,5 +1,6 @@
 import logging
 import secrets
+import time
 from pathlib import Path
 from fastapi import APIRouter, Request, UploadFile, File, HTTPException, Header
 from pydantic import BaseModel, Field
@@ -39,8 +40,17 @@ def chat(payload: ChatRequest, request: Request, x_api_key: str = Header(default
             headers={"Retry-After": "60"},
         )
     try:
+        started = time.perf_counter()
         result = ask(payload.question)
-        write_audit(payload.question, result["source_used"], result.get("trace", []))
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        write_audit(
+            payload.question,
+            result["source_used"],
+            result.get("trace", []),
+            client_ip=request.client.host if request.client else "unknown",
+            authenticated=bool(settings.chat_api_key),
+            duration_ms=duration_ms,
+        )
 
         return {
             "answer": result["answer"],
