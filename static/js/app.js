@@ -3,6 +3,12 @@ const form = document.getElementById("chatForm");
 const question = document.getElementById("question");
 const trace = document.getElementById("trace");
 const sourceUsed = document.getElementById("sourceUsed");
+const chatKey = document.getElementById("chatKey");
+
+chatKey.value = localStorage.getItem("chatApiKey") || "";
+chatKey.addEventListener("input", () =>
+  localStorage.setItem("chatApiKey", chatKey.value.trim()),
+);
 
 function escapeHtml(s = "") {
   return s.replace(
@@ -15,6 +21,53 @@ function escapeHtml(s = "") {
 }
 function formatText(s = "") {
   return escapeHtml(s).replace(/\n/g, "<br>");
+}
+// Markdown-ish rendering for answers: escape FIRST, then apply a few
+// transforms that only ever emit our own tags. Supported: ## headings,
+// "-"/"*" bullets, "1."/"1)" numbered lists, **bold**, *italic*, `code`.
+function inlineMd(s) {
+  return s
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|\W)\*([^*\n]+)\*(?=\W|$)/g, "$1<em>$2</em>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+function renderMarkdown(s = "") {
+  const out = [];
+  let list = null; // current open list tag: "ul" | "ol" | null
+  const closeList = () => {
+    if (list) {
+      out.push(`</${list}>`);
+      list = null;
+    }
+  };
+  for (const raw of escapeHtml(s).split("\n")) {
+    const line = raw.trimEnd();
+    const bullet = line.match(/^[-*]\s+(.*)/);
+    const numbered = line.match(/^\d+[.)]\s+(.*)/);
+    if (bullet || numbered) {
+      const tag = bullet ? "ul" : "ol";
+      if (list !== tag) {
+        closeList();
+        out.push(`<${tag}>`);
+        list = tag;
+      }
+      out.push(`<li>${inlineMd((bullet || numbered)[1])}</li>`);
+      continue;
+    }
+    closeList();
+    if (!line.trim()) {
+      out.push("<br>");
+      continue;
+    }
+    const heading = line.match(/^#{1,4}\s+(.*)/);
+    if (heading) {
+      out.push(`<strong>${inlineMd(heading[1])}</strong><br>`);
+      continue;
+    }
+    out.push(inlineMd(line) + "<br>");
+  }
+  closeList();
+  return out.join("");
 }
 // Only http(s) may become a link; anything else (e.g. javascript:) renders as text.
 function safeHref(url = "") {
@@ -34,7 +87,7 @@ function addMessage(role, text, source = "", citations = []) {
         })
         .join("<br>")}</div>`
     : "";
-  wrap.innerHTML = `<div class="avatar">AI</div><div class="bubble">${formatText(text)}${source ? `<div class="answer-source">Source: ${escapeHtml(source)}</div>` : ""}${citeHtml}</div>`;
+  wrap.innerHTML = `<div class="avatar">AI</div><div class="bubble">${renderMarkdown(text)}${source ? `<div class="answer-source">Source: ${escapeHtml(source)}</div>` : ""}${citeHtml}</div>`;
   chat.appendChild(wrap);
   chat.scrollTop = chat.scrollHeight;
 }
@@ -55,7 +108,10 @@ async function askAgent(q) {
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": localStorage.getItem("chatApiKey") || "",
+      },
       body: JSON.stringify({ question: q }),
     });
     const data = await res.json();

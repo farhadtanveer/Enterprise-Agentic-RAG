@@ -97,6 +97,12 @@ All settings live in `app/core/config.py` and can be overridden via `.env`:
 | `PINECONE_NAMESPACE` | no | `enterprise-agentic-rag` | |
 | `TOP_K` | no | `4` | Chunks fetched per retrieval |
 | `MAX_RETRIES` | no | `1` | Query-rewrite retries before giving up |
+| `INDEX_READY_TIMEOUT_SECONDS` | no | `120` | How long to wait for a fresh Pinecone index before failing |
+| `LLM_TIMEOUT_SECONDS` | no | `60` | Per-call timeout for OpenAI requests |
+| `WEB_SEARCH_TIMEOUT_SECONDS` | no | `30` | Deadline for a Tavily search |
+| `CHAT_API_KEY` | no | *(unset)* | When set, `/api/chat` requires a matching `X-API-Key` header. The web UI has a key field for this |
+| `CHAT_RATE_LIMIT_PER_MINUTE` | no | `20` | Chat requests per minute per IP (0 disables) |
+| `LANGSMITH_TRACING` | no | — | Set `true` to trace every graph run in LangSmith (with `LANGSMITH_API_KEY`, optionally `LANGSMITH_PROJECT`). No code needed — the `langsmith` package is already installed |
 
 ## API
 
@@ -106,7 +112,7 @@ All settings live in `app/core/config.py` and can be overridden via `.env`:
 | `POST` | `/api/chat` | Ask a question, get an answer + trace + citations |
 | `POST` | `/api/ingest` | Upload a document (PDF, TXT, MD, DOCX) into the index |
 
-Chat is rate-limited (20 requests/min/IP, `CHAT_RATE_LIMIT_PER_MINUTE`) and returns `429` with a `Retry-After` header when exceeded. Auth on chat is opt-in: set `CHAT_API_KEY` and clients must send a matching `X-API-Key` header — note the bundled web UI doesn't send keys, so enabling it takes the UI out of play until it grows a key field.
+Chat is rate-limited (20 requests/min/IP, `CHAT_RATE_LIMIT_PER_MINUTE`) and returns `429` with a `Retry-After` header when exceeded. Auth is opt-in: set `CHAT_API_KEY` and clients must send a matching `X-API-Key` header — the bundled web UI has a key field in the sidebar for exactly this.
 
 Chat:
 
