@@ -1,17 +1,19 @@
 import logging
 import secrets
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, HTTPException, Header
+from fastapi import APIRouter, Request, UploadFile, File, HTTPException, Header
 from pydantic import BaseModel, Field
 from app.core.config import get_settings
 from app.rag.workflow import ask
-from app.rag.vectorstore import add_documents 
+from app.rag.vectorstore import add_documents
 from app.services.ingestion import load_file, chunk_documents, SUPPORTED
 from app.services.audit import write_audit
+from app.services.ratelimit import SlidingWindowLimiter
 
 router = APIRouter(prefix="/api")
 settings = get_settings()
 logger = logging.getLogger(__name__)
+chat_limiter = SlidingWindowLimiter(settings.chat_rate_limit_per_minute)
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=2, max_length=3000)
@@ -23,11 +25,19 @@ def health():
 
 
 @router.post("/chat")
-def chat(payload: ChatRequest, x_api_key: str = Header(default="")):
+def chat(payload: ChatRequest, request: Request, x_api_key: str = Header(default="")):
     if settings.chat_api_key and not secrets.compare_digest(
         x_api_key.encode("utf-8"), settings.chat_api_key.encode("utf-8")
     ):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    if settings.chat_rate_limit_per_minute > 0 and not chat_limiter.allow(
+        request.client.host if request.client else "unknown"
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Try again shortly.",
+            headers={"Retry-After": "60"},
+        )
     try:
         result = ask(payload.question)
         write_audit(payload.question, result["source_used"], result.get("trace", []))
