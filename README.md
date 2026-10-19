@@ -106,6 +106,8 @@ All settings live in `app/core/config.py` and can be overridden via `.env`:
 | `POST` | `/api/chat` | Ask a question, get an answer + trace + citations |
 | `POST` | `/api/ingest` | Upload a document (PDF, TXT, MD, DOCX) into the index |
 
+Chat is rate-limited (20 requests/min/IP, `CHAT_RATE_LIMIT_PER_MINUTE`) and returns `429` with a `Retry-After` header when exceeded. Auth on chat is opt-in: set `CHAT_API_KEY` and clients must send a matching `X-API-Key` header — note the bundled web UI doesn't send keys, so enabling it takes the UI out of play until it grows a key field.
+
 Chat:
 
 ```bash
