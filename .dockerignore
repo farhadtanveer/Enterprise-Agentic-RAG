@@ -12,3 +12,12 @@ env
 .pytest_cache
 tests
 *.log
+
+# Project: runtime data and local-only files must not be baked into the image
+uploads/
+data/*.db
+state/
+Agentic-RAG-demo/
+create_project.py
+steps.md
+AUDIT.md
