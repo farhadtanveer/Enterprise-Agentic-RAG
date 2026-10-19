@@ -21,4 +21,7 @@ USER appuser
 
 EXPOSE 8080
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request, os, sys; port = os.environ.get('PORT', '8080'); r = urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=3); sys.exit(0 if r.status == 200 else 1)"
+
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
