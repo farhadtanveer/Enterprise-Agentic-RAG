@@ -3,6 +3,12 @@ const form = document.getElementById("chatForm");
 const question = document.getElementById("question");
 const trace = document.getElementById("trace");
 const sourceUsed = document.getElementById("sourceUsed");
+const chatKey = document.getElementById("chatKey");
+
+chatKey.value = localStorage.getItem("chatApiKey") || "";
+chatKey.addEventListener("input", () =>
+  localStorage.setItem("chatApiKey", chatKey.value.trim()),
+);
 
 function escapeHtml(s = "") {
   return s.replace(
@@ -55,7 +61,10 @@ async function askAgent(q) {
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": localStorage.getItem("chatApiKey") || "",
+      },
       body: JSON.stringify({ question: q }),
     });
     const data = await res.json();

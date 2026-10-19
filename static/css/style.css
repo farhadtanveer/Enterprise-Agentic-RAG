@@ -82,6 +82,17 @@ body {
   padding: 11px 13px;
   cursor: pointer;
 }
+.key-input {
+  border: 1px solid #303b4b;
+  background: #151c26;
+  color: #dbe4ee;
+  border-radius: 10px;
+  padding: 11px 13px;
+  font-size: 13px;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+}
 .main {
   display: flex;
   flex-direction: column;
