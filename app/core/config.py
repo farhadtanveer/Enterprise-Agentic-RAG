@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     top_k: int = 4
     max_retries: int = 1
+    index_ready_timeout_seconds: int = 120
     admin_api_key: str = "change-me"
     audit_db_path: str = str(BASE_DIR / "data" / "audit.db")
     upload_dir: str = str(BASE_DIR / "uploads")
