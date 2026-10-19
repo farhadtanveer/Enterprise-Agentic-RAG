@@ -13,6 +13,12 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY . .
 
+# Non-root: the app writes only under /app (data/audit.db, uploads/),
+# which the chown below hands to the runtime user.
+RUN useradd --create-home appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8080
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
