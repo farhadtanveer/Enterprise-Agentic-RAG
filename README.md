@@ -43,7 +43,7 @@ The whole thing is defined in `app/rag/workflow.py` — nodes are plain function
 
 ## Setup
 
-You'll need Python 3.11+ (built on 3.13) and API keys for OpenAI, Pinecone, and Tavily.
+You'll need Python 3.13 and API keys for OpenAI, Pinecone, and Tavily.
 
 ```bash
 git clone <your-repo-url>
