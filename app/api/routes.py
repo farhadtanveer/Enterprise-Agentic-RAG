@@ -23,7 +23,11 @@ def health():
 
 
 @router.post("/chat")
-def chat(payload: ChatRequest):
+def chat(payload: ChatRequest, x_api_key: str = Header(default="")):
+    if settings.chat_api_key and not secrets.compare_digest(
+        x_api_key.encode("utf-8"), settings.chat_api_key.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
     try:
         result = ask(payload.question)
         write_audit(payload.question, result["source_used"], result.get("trace", []))

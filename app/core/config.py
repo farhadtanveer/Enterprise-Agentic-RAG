@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     web_search_timeout_seconds: int = 30
     admin_api_key: str = DEFAULT_ADMIN_KEY
+    chat_api_key: str = ""
     audit_db_path: str = str(BASE_DIR / "data" / "audit.db")
     upload_dir: str = str(BASE_DIR / "uploads")
     sample_kb_dir: str = str(BASE_DIR / "data" / "sample_kb")
@@ -47,3 +48,12 @@ def validate_admin_key(settings: Settings) -> None:
     logging.getLogger(__name__).warning(
         "ADMIN_API_KEY is the default ('change-me'); /api/ingest is effectively unprotected."
     )
+
+
+def validate_chat_security(settings: Settings) -> None:
+    """Chat auth is opt-in (the bundled UI sends no key); warn when it is off."""
+    if not settings.chat_api_key:
+        logging.getLogger(__name__).warning(
+            "CHAT_API_KEY is not set; /api/chat is unauthenticated. "
+            "Set CHAT_API_KEY to require the X-API-Key header."
+        )
