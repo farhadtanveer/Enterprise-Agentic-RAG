@@ -43,7 +43,7 @@ The whole thing is defined in `app/rag/workflow.py` — nodes are plain function
 
 ## Setup
 
-You'll need Python 3.13 and API keys for OpenAI, Pinecone, and Tavily.
+You'll need Python 3.13, Docker (for the Postgres dev database), and API keys for OpenAI, Pinecone, and Tavily.
 
 ```bash
 git clone <your-repo-url>
@@ -64,6 +64,16 @@ PINECONE_API_KEY=...
 TAVILY_API_KEY=...
 ADMIN_API_KEY=something-secret   # protects the upload endpoint — don't ship "change-me"
 ```
+
+## Tests
+
+```bash
+docker compose up -d db          # Postgres 18 on localhost:5433
+export TEST_DATABASE_URL=postgresql+psycopg://rag:rag@localhost:5433/rag_test
+python -m pytest tests -q
+```
+
+Details and rules (real Postgres for the new schema, mocked LLM/Tavily/Pinecone, opt-in live check) in [docs/dev-testing.md](docs/dev-testing.md).
 
 Load the sample knowledge base:
 

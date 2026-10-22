@@ -5,6 +5,24 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Tests run against real Postgres — never SQLite (JSONB/inet/enums/
+    # uuidv7 must behave exactly as deployed; docs/dev-testing.md).
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+          POSTGRES_DB: rag_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rag -d rag_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://rag:rag@localhost:5433/rag_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -13,7 +31,7 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
-      - name: Run tests (offline, no API keys)
+      - name: Run tests (LLM/Tavily/Pinecone mocked, real Postgres, no API keys)
         run: python -m pytest tests -q
 
   audit:
