@@ -100,9 +100,18 @@ All settings live in `app/core/config.py` and can be overridden via `.env`:
 | `INDEX_READY_TIMEOUT_SECONDS` | no | `120` | How long to wait for a fresh Pinecone index before failing |
 | `LLM_TIMEOUT_SECONDS` | no | `60` | Per-call timeout for OpenAI requests |
 | `WEB_SEARCH_TIMEOUT_SECONDS` | no | `30` | Deadline for a Tavily search |
-| `CHAT_API_KEY` | no | *(unset)* | When set, `/api/chat` requires a matching `X-API-Key` header. The web UI has a key field for this |
+| `CHAT_API_KEY` | no | *(unset)* | When set, `/api/chat` requires a matching `X-API-Key` header. The web UI has a key field for this. **Deprecated** — removed with the legacy endpoints at the end of the multi-user rollout |
 | `CHAT_RATE_LIMIT_PER_MINUTE` | no | `20` | Chat requests per minute per IP (0 disables) |
-| `LANGSMITH_TRACING` | no | — | Set `true` to trace every graph run in LangSmith (with `LANGSMITH_API_KEY`, optionally `LANGSMITH_PROJECT`). No code needed — the `langsmith` package is already installed |
+| `DATABASE_URL` | no | `postgresql+psycopg://rag:rag@localhost:5432/rag` | Postgres 18 (local dev: `docker compose up -d db`) |
+| `TEST_DATABASE_URL` | for tests | *(unset)* | Tests refuse to run without it; never points at the dev DB (see `docs/dev-testing.md`) |
+| `COOKIE_SECURE` | no | `true` | Session cookie Secure flag; `false` only for local plain-http dev |
+| `SESSION_IDLE_HOURS` | no | `168` | Sliding session idle timeout |
+| `SESSION_ABSOLUTE_DAYS` | no | `30` | Hard session cap from login |
+| `ENABLE_WEB_FALLBACK` | no | `true` | `false` = the web-fallback node short-circuits; query text never reaches Tavily |
+| `MAX_UPLOAD_MB` | no | `25` | Upload size cap; oversize uploads get `413` |
+| `CONVERSATION_RETENTION_DAYS` | no | `0` | 0 = keep until the user deletes (retention sweep deferred) |
+| `PINECONE_TEST_NAMESPACE` | no | `multi-user-test` | Namespace for the opt-in live Pinecone check |
+| `LANGSMITH_TRACING` | no | `false` | Keep `false`: `true` sends every question, retrieved chunk, and answer to LangSmith's cloud (third party). Enable only in staging with synthetic data |
 
 ## API
 

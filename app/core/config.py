@@ -29,6 +29,22 @@ class Settings(BaseSettings):
     upload_dir: str = str(BASE_DIR / "uploads")
     sample_kb_dir: str = str(BASE_DIR / "data" / "sample_kb")
 
+    # --- Multi-user foundation (docs/backend-design.md, Phase B) ---
+    database_url: str = "postgresql+psycopg://rag:rag@localhost:5432/rag"
+    # Tests fail fast when this is unset; never default to the dev database.
+    test_database_url: str = ""
+    # Secure cookie flag: keep true everywhere except local plain-http dev.
+    cookie_secure: bool = True
+    session_idle_hours: int = 168  # 7 days sliding
+    session_absolute_days: int = 30  # hard cap from login
+    # D6 kill switch: false = web fallback node short-circuits, query text
+    # never reaches Tavily.
+    enable_web_fallback: bool = True
+    max_upload_mb: int = 25  # 413 beyond this; enforced while streaming
+    # D5: 0 = keep conversations until the user deletes them (sweep deferred).
+    conversation_retention_days: int = 0
+    pinecone_test_namespace: str = "multi-user-test"
+
     model_config = SettingsConfigDict(env_file=str(BASE_DIR / ".env"), extra="ignore")
 
 
