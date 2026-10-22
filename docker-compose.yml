@@ -2,13 +2,17 @@ services:
   db:
     image: postgres:18-alpine
     environment:
-      POSTGRES_USER: rag
-      POSTGRES_PASSWORD: rag
-      POSTGRES_DB: rag
+      # Interpolated from the project .env (compose reads it automatically).
+      # The rag/rag fallback is a DEV-ONLY credential for a 127.0.0.1-bound
+      # container; override POSTGRES_PASSWORD in .env for anything real, and
+      # keep DATABASE_URL/TEST_DATABASE_URL in sync when you do.
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
     ports:
       # Host 5433: a locally installed Windows PostgreSQL often occupies 5432;
       # this compose DB never fights it for the default port.
-      - "5433:5432"
+      - "[::1]:5433:5432"  # TEMPORARY diagnostic: IPv6 loopback instead of IPv4
     volumes:
       # PG18 image layout: mount the parent dir; data lands in 18/docker/,
       # leaving room for pg_upgrade of future major versions.
