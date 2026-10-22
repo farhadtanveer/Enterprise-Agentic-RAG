@@ -9,15 +9,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-rag}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
       POSTGRES_DB: ${POSTGRES_DB:-rag}
-    ports:
-      # Host 5433: a locally installed Windows PostgreSQL often occupies 5432;
-      # this compose DB never fights it for the default port.
-      # Host 5433 (5432 is taken by a local Windows PostgreSQL). Loopback-only
-      # binding is the goal (see docs/dev-testing.md), but this Docker Desktop
-      # install currently STALLS IPv4-loopback publishes (SELECT 1 took 130 s;
-      # bare binding takes 1.4 s) — pending a Docker Desktop restart to clear
-      # the relay state. Revert to "127.0.0.1:5433:5432" after that restart.
-      - "5433:5432"
+    # NO host port publish on purpose: this Docker Desktop build stalls
+    # loopback publishes (~130 s per query) and a bare binding would expose
+    # the dev DB to the LAN. Everything needing the DB — tests, Alembic, the
+    # app itself from B2 — runs on the compose network (`db:5432`).
+    # Interactive access: docker compose exec db psql -U rag -d rag
+    # (docs/dev-testing.md has the temporary-publish recipe for host tools).
     volumes:
       # PG18 image layout: mount the parent dir; data lands in 18/docker/,
       # leaving room for pg_upgrade of future major versions.
@@ -29,6 +26,26 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Test runner: same Python 3.13 + pinned deps as the app image, plus dev
+  # tools; talks to the DB over the compose network only. Opt-in via profile
+  # so `docker compose up` never builds it.
+  test:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    environment:
+      TEST_DATABASE_URL: postgresql+psycopg://rag:rag@db:5432/rag_test
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://rag:rag@db:5432/rag_test
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    # python -m (not the console script) so the repo root lands on sys.path
+    # and `import app` resolves — same as CI and the host workflow.
+    command: ["python", "-m", "pytest", "tests", "-q"]
 
 volumes:
   pgdata:

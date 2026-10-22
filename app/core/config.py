@@ -30,7 +30,9 @@ class Settings(BaseSettings):
     sample_kb_dir: str = str(BASE_DIR / "data" / "sample_kb")
 
     # --- Multi-user foundation (docs/backend-design.md, Phase B) ---
-    database_url: str = "postgresql+psycopg://rag:rag@localhost:5433/rag"
+    # Dev default is the compose-network hostname (db:5432): the dev DB has
+    # no host port by design (LAN exposure). CI and prod override via env.
+    database_url: str = "postgresql+psycopg://rag:rag@db:5432/rag"
     # Tests fail fast when this is unset; never default to the dev database.
     test_database_url: str = ""
     # Secure cookie flag: keep true everywhere except local plain-http dev.

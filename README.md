@@ -68,12 +68,10 @@ ADMIN_API_KEY=something-secret   # protects the upload endpoint — don't ship "
 ## Tests
 
 ```bash
-docker compose up -d db          # Postgres 18 on localhost:5433
-export TEST_DATABASE_URL=postgresql+psycopg://rag:rag@localhost:5433/rag_test
-python -m pytest tests -q
+docker compose --profile test run --rm test
 ```
 
-Details and rules (real Postgres for the new schema, mocked LLM/Tavily/Pinecone, opt-in live check) in [docs/dev-testing.md](docs/dev-testing.md).
+That builds the test image (runtime deps + pinned dev tools), starts Postgres 18, and runs the whole suite against it over the compose network — the dev DB deliberately has **no host port**, so nothing outside Docker (or your Wi-Fi) can reach it. Details and rules (real Postgres for the new schema, mocked LLM/Tavily/Pinecone, opt-in live check) in [docs/dev-testing.md](docs/dev-testing.md).
 
 Load the sample knowledge base:
 
@@ -112,7 +110,7 @@ All settings live in `app/core/config.py` and can be overridden via `.env`:
 | `WEB_SEARCH_TIMEOUT_SECONDS` | no | `30` | Deadline for a Tavily search |
 | `CHAT_API_KEY` | no | *(unset)* | When set, `/api/chat` requires a matching `X-API-Key` header. The web UI has a key field for this. **Deprecated** — removed with the legacy endpoints at the end of the multi-user rollout |
 | `CHAT_RATE_LIMIT_PER_MINUTE` | no | `20` | Chat requests per minute per IP (0 disables) |
-| `DATABASE_URL` | no | `postgresql+psycopg://rag:rag@localhost:5433/rag` | Postgres 18 (local dev: `docker compose up -d db`; host port 5433 to avoid a local Postgres on 5432) |
+| `DATABASE_URL` | no | `postgresql+psycopg://rag:rag@db:5432/rag` | Postgres 18 on the compose network (the dev DB has no host port — see `docs/dev-testing.md`) |
 | `TEST_DATABASE_URL` | for tests | *(unset)* | Tests refuse to run without it; never points at the dev DB (see `docs/dev-testing.md`) |
 | `COOKIE_SECURE` | no | `true` | Session cookie Secure flag; `false` only for local plain-http dev |
 | `SESSION_IDLE_HOURS` | no | `168` | Sliding session idle timeout |

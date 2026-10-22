@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.13-slim AS base
 
 WORKDIR /app
 
@@ -10,6 +10,16 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
+
+
+# Test stage (used by `docker compose --profile test run --rm test`):
+# runtime deps plus the pinned dev tools; source arrives via bind mount.
+FROM base AS test
+COPY requirements-dev.txt .
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
+
+FROM base AS runtime
 
 COPY . .
 

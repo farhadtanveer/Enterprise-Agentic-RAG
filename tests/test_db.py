@@ -11,9 +11,9 @@ TEST_URL = os.environ.get("TEST_DATABASE_URL", "")
 def engine():
     if not TEST_URL:
         pytest.fail(
-            "TEST_DATABASE_URL is not set. Tests need real Postgres: "
-            "docker compose up -d db, then export TEST_DATABASE_URL="
-            "postgresql+psycopg://rag:rag@localhost:5433/rag_test "
+            "TEST_DATABASE_URL is not set. DB tests run inside the compose "
+            "network (the dev DB has no host port by design): "
+            "docker compose --profile test run --rm test  "
             "(see docs/dev-testing.md)"
         )
     from app.core.db import get_engine
