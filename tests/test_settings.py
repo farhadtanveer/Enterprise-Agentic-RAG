@@ -7,7 +7,10 @@ def _settings(**kwargs):
     return Settings(_env_file=None, **kwargs)
 
 
-def test_database_settings_defaults():
+def test_database_settings_defaults(monkeypatch):
+    # Clear the env the suite itself may run with: we're asserting the CODE
+    # defaults here, and TEST_DATABASE_URL legitimately overrides them.
+    monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
     s = _settings()
     assert s.database_url.startswith("postgresql+psycopg://")
     assert s.test_database_url == ""  # never silently point tests at the dev DB
