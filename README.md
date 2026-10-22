@@ -102,7 +102,7 @@ All settings live in `app/core/config.py` and can be overridden via `.env`:
 | `WEB_SEARCH_TIMEOUT_SECONDS` | no | `30` | Deadline for a Tavily search |
 | `CHAT_API_KEY` | no | *(unset)* | When set, `/api/chat` requires a matching `X-API-Key` header. The web UI has a key field for this. **Deprecated** — removed with the legacy endpoints at the end of the multi-user rollout |
 | `CHAT_RATE_LIMIT_PER_MINUTE` | no | `20` | Chat requests per minute per IP (0 disables) |
-| `DATABASE_URL` | no | `postgresql+psycopg://rag:rag@localhost:5432/rag` | Postgres 18 (local dev: `docker compose up -d db`) |
+| `DATABASE_URL` | no | `postgresql+psycopg://rag:rag@localhost:5433/rag` | Postgres 18 (local dev: `docker compose up -d db`; host port 5433 to avoid a local Postgres on 5432) |
 | `TEST_DATABASE_URL` | for tests | *(unset)* | Tests refuse to run without it; never points at the dev DB (see `docs/dev-testing.md`) |
 | `COOKIE_SECURE` | no | `true` | Session cookie Secure flag; `false` only for local plain-http dev |
 | `SESSION_IDLE_HOURS` | no | `168` | Sliding session idle timeout |

@@ -49,6 +49,7 @@ packaging==24.2
 pinecone==7.3.0
 pinecone-plugin-assistant==1.8.0
 pinecone-plugin-interface==0.0.7
+psycopg[binary]==3.3.6
 propcache==0.5.4
 pydantic==2.14.1
 pydantic-settings==2.10.1
