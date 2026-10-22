@@ -12,7 +12,12 @@ services:
     ports:
       # Host 5433: a locally installed Windows PostgreSQL often occupies 5432;
       # this compose DB never fights it for the default port.
-      - "[::1]:5433:5432"  # TEMPORARY diagnostic: IPv6 loopback instead of IPv4
+      # Host 5433 (5432 is taken by a local Windows PostgreSQL). Loopback-only
+      # binding is the goal (see docs/dev-testing.md), but this Docker Desktop
+      # install currently STALLS IPv4-loopback publishes (SELECT 1 took 130 s;
+      # bare binding takes 1.4 s) — pending a Docker Desktop restart to clear
+      # the relay state. Revert to "127.0.0.1:5433:5432" after that restart.
+      - "5433:5432"
     volumes:
       # PG18 image layout: mount the parent dir; data lands in 18/docker/,
       # leaving room for pg_upgrade of future major versions.
