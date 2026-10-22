@@ -1,8 +1,9 @@
 # Multi-User Backend Design — Phase A
 
-**Status:** Design only. No application code, no migrations, no data changes.
+**Status:** Design, amended after Farhad's decision review 2026-10-22 (D1–D18
+resolved, D19 opened — see §13). Phase B scope revised accordingly (§A12).
 **Branch:** `backend/multi-user`
-**Date:** 2026-10-22
+**Date:** 2026-10-22 (amended same day)
 **Product rules:** `admin`/`user` roles · admins manage users and documents ·
 conversations are readable **only** by their owner (admins included in "nobody
 else") · admins are users too · no sign-up · users see/delete only their own
@@ -164,8 +165,8 @@ and backups*. Plus the service itself against anonymous internet actors
    + embeddings) and Tavily (web fallback receives `current_query`,
    `workflow.py:100`) receive user content. If `LANGSMITH_TRACING=true`, the
    full trace (question, chunks, answers) also goes to LangSmith's cloud.
-   Mitigations: tracing stays **off by default** and is called out in
-   `.env.example` as "sends user content to a third party"; no question text
+   Mitigations: `.env.example` sets `LANGSMITH_TRACING=false` **explicitly**
+   (D13), labeled "sends user content to a third party"; no question text
    in application logs (pinned by test); a deployment-level kill switch for
    the web fallback is noted in D6. If the company later requires it, the LLM
    vendor choice/contract is the lever — not this codebase.
@@ -182,14 +183,14 @@ and backups*. Plus the service itself against anonymous internet actors
 
 | Component | Choice | Rationale / challenge |
 |---|---|---|
-| Database | **PostgreSQL 18** (`postgres:18-alpine` in a new `docker-compose.yml` for local dev; prod via `DATABASE_URL`) | Sessions, lockout counters and transactions want a real DB. SQLite would fight us on concurrent writes and row-level constraints. **D1** |
+| Database | **PostgreSQL 18** (`postgres:18-alpine` in a new `docker-compose.yml` for local dev **and tests**; prod via `DATABASE_URL`) | Sessions, lockout counters and transactions want a real DB. SQLite would fight us on concurrent writes and row-level constraints. **D1**. Tests also run against real Postgres — never SQLite — because JSONB, `inet` columns, native enums and `uuidv7()` must be exercised exactly as deployed. CI gets the Postgres service in **B1**, not B9. |
 | ORM / migrations | **SQLAlchemy 2.x** (already pinned, `requirements.txt`) + **Alembic** (new dep — versioned, reviewable schema migrations for 7 new tables; no runtime auto-create in production) | SQLAlchemy costs nothing new. Alembic is the standard companion. |
 | Driver | **psycopg 3** (`psycopg[binary]`, new dep — the Postgres DBAPI driver SQLAlchemy talks to; sync variant matches the existing sync route style) | |
 | Password hashing | **argon2id** via `argon2-cffi` (new dep — OWASP-recommended memory-hard hashing; `hashlib`-only options are weaker, `passlib` is unmaintained) | |
-| Sessions | **Server-side sessions in Postgres.** 256-bit random token in an httpOnly + Secure + SameSite=Lax cookie; DB stores only SHA-256(token). **No JWT** — a JWT would either outlive logout or need a denylist, which is a session table with worse ergonomics. | |
+| Sessions | **Server-side sessions in Postgres.** 256-bit random token in an httpOnly + SameSite=Lax cookie; DB stores only SHA-256(token). **No JWT** — a JWT would either outlive logout or need a denylist, which is a session table with worse ergonomics. `COOKIE_SECURE` is a settings flag: default `true`; set `false` only for local development over plain http. | |
 | CSRF | Double-submit token: non-httpOnly `csrf` cookie + `X-CSRF-Token` header required on all mutating requests; SameSite=Lax as the outer layer | Same-origin deployment makes this simple. |
-| Login protection | Per-IP sliding window (reuse `SlidingWindowLimiter`) **and** per-username failed-attempt lockout in Postgres: 5 failures → 15 min, doubling to 1 h. Generic error text (no user enumeration). | |
-| Chat rate limiting | Existing `SlidingWindowLimiter` **re-keyed from IP to user_id** (plus keep IP limit for `/api/auth/login` only). Still in-memory, single-process — documented limitation; move to Postgres-backed counters if multi-worker deployment arrives. | |
+| Login protection | Per-IP sliding window (reuse `SlidingWindowLimiter`) **and** failed-attempt throttling keyed on **(username, client IP)** with exponential delay (5th failure → 15 min, doubling, capped at 1 h; resets on success). No hard account lock: a hard username-wide lock would let anyone lock a victim out by spamming their username from anywhere. Generic error text (no user enumeration). Recovery CLIs exist (§A5). | |
+| Chat rate limiting | Existing `SlidingWindowLimiter` **re-keyed from IP to user_id** (plus keep the IP limit for `/api/auth/login`). Still in-memory, single-process — documented limitation; move to Postgres-backed counters if multi-worker deployment arrives. **Client-IP resolution:** limits use the socket peer IP; behind a reverse proxy, uvicorn is run with `--proxy-headers` and `FORWARDED_ALLOW_IPS` limited to the actual proxy IP, so `request.client.host` is the real client. No `X-Forwarded-For` header is trusted from untrusted sources (spoofing would bypass per-IP limits). | |
 | Deployment | Same-origin: FastAPI serves the built frontend (existing pattern, `app/main.py:22-27`). **No CORS middleware at all** — the strongest CSRF posture is not needing cross-origin in the first place. | |
 
 What would change these choices: a mandated Redis/Keycloak SSO from company
@@ -200,19 +201,30 @@ IT (sessions/lockout move there), or a decision to run multi-worker/replicas
 
 ## A4. Data model
 
-All IDs are UUIDv7 (time-ordered, safe in URLs, non-guessable in practice).
-All timestamps `timestamptz`. Enums via native PG enums or CHECK constraints —
-implementation detail for Phase B; shown here as enums.
+All IDs are UUIDv7 (time-ordered, safe in URLs, non-guessable in practice)
+with **`uuidv7()` as the Postgres-side column default** — Postgres 18 provides
+it natively and Python 3.13's stdlib has no uuid7, so the DB is the single
+generator and no client-side UUID code is needed. All timestamps
+`timestamptz` with `now()` defaults. Enums via native PG enums or CHECK
+constraints — implementation detail for Phase B; shown here as enums.
 
 ```mermaid
 erDiagram
     users ||--o{ sessions : "has"
     users ||--o{ conversations : "owns"
-    users ||--o{ documents : "uploads (private or org)"
+    users ||--o{ documents : "uploads (private only)"
     users ||--o{ message_feedback : "gives"
     users ||--o{ audit_events : "acts (nullable)"
     conversations ||--o{ messages : "contains"
     messages ||--o{ message_feedback : "receives (owner only)"
+
+    login_throttle {
+        text username_hash UK "salted hash, NOT plaintext - works for unknown users too"
+        inet ip
+        int fail_count
+        timestamptz throttle_until
+        timestamptz last_failure_at
+    }
 
     users {
         uuid id PK
@@ -222,8 +234,6 @@ erDiagram
         user_role role "admin | user"
         boolean is_active "false = disabled"
         boolean must_change_password "temp password flag"
-        int failed_login_count
-        timestamptz locked_until
         timestamptz password_changed_at
         timestamptz created_at
         timestamptz updated_at
@@ -250,6 +260,7 @@ erDiagram
         uuid id PK
         uuid conversation_id FK "ON DELETE CASCADE"
         msg_role role "user | assistant"
+        msg_status status "ok | error (failed graph run)"
         text content "the ONLY place question/answer text lives"
         jsonb citations
         jsonb trace "owner-readable; contains rewritten query"
@@ -263,7 +274,7 @@ erDiagram
     }
     documents {
         uuid id PK
-        uuid owner_id FK "NULL for system/org docs by admin; ON DELETE SET NULL"
+        uuid owner_id FK "org docs: ALWAYS NULL (D16); private: required, ON DELETE CASCADE"
         doc_scope scope "org | private"
         text display_name "original filename, for citations"
         text storage_path "uploads/<doc_id>/<display_name>"
@@ -312,7 +323,10 @@ Constraints and indexes (minimum):
   onto messages**; one owner, one join, no drift.
 - `documents (scope)`, `(owner_id)`, unique `(checksum, scope, owner_id)`
   *not* imposed globally — same file may legitimately exist as org and
-  private; dedupe is advisory (§A7).
+  private; dedupe is advisory (§A7). `scope='org' ⇒ owner_id IS NULL` is
+  enforced by CHECK (org documents are ownerless by definition — **D16**,
+  amended: always NULL, never attributed to an admin); `scope='private' ⇒
+  owner_id IS NOT NULL`.
 - `message_feedback`: unique `(message_id, user_id)` (one vote per user);
   FK cascade from messages. Comments are owner-visible only (§A8).
 - `audit_events (created_at)`, `(actor_user_id)`, `(event_type, created_at)`;
@@ -333,15 +347,15 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     B->>API: POST /api/auth/login {username, password}
-    API->>DB: lockout check (failed_login_count / locked_until)
+    API->>DB: throttle check for (username, client IP) — exponential delay active?
     API->>API: argon2id verify
     alt ok
-        API->>DB: INSERT sessions(token_hash, expiry); reset fail counter
-        API-->>B: Set-Cookie sid (httpOnly, Secure, SameSite=Lax) + csrf cookie; 200 {user}
+        API->>DB: INSERT sessions(token_hash, expiry); clear (username, IP) failure records
+        API-->>B: Set-Cookie sid (httpOnly, Secure per COOKIE_SECURE, SameSite=Lax) + csrf cookie; 200 {user}
     else bad password
-        API->>DB: failed_login_count += 1; lock if threshold
+        API->>DB: record failure for (username hash, IP); raise delay if 5th
         API-->>B: 401 "Invalid username or password" (same text for unknown user)
-    else locked
+    else throttled
         API-->>B: 429 with Retry-After
     end
     Note over B,API: every subsequent request: cookie → sha256 → sessions lookup<br/>(active? not expired? not revoked) → request.user
@@ -365,14 +379,26 @@ Lifecycle rules:
   except `GET /api/me`, `POST /api/auth/password` and `POST /api/auth/logout`
   returns `403 {"code": "password_change_required"}`. The UI shows a change
   form first.
-- **Session expiry & renewal:** idle timeout 7 days, absolute 30 days
-  (**D7**). Sliding renewal: on each authenticated request, if more than
+- **Session expiry & renewal:** idle timeout 7 days, absolute 30 days,
+  both configurable (`SESSION_IDLE_HOURS`, `SESSION_ABSOLUTE_DAYS`) per
+  **D7**. Sliding renewal: on each authenticated request, if more than
   10 minutes of idle budget was consumed, write back a fresh `idle_expires_at`
   (throttled writes). Expired sessions are deleted by a periodic sweep.
 - **Logout:** revokes the session row (`revoked_at`), clears cookie.
 - **Disable user** (`PATCH /api/admin/users/{id}` `is_active=false`): revokes
   all sessions immediately; every request of a disabled user is 401 even with
   a live cookie (checked in the session lookup). Data retained (**D9**).
+- **Last-admin protection:** the system refuses (`409 Conflict`) any admin
+  action that would leave zero active admins — disabling, demoting, or
+  deleting the last active admin, **including by that admin themself**.
+  Counted as `users WHERE role='admin' AND is_active`.
+- **Recovery CLIs** (for when an admin is locked out or left the company and
+  no other admin exists): `python -m app.cli reset-password <username>` and
+  `python -m app.cli unlock <username>` — interactive, run on the server by
+  an operator with shell access (same trust level as `bootstrap-admin`).
+  `reset-password` sets a temp password + `must_change_password` and revokes
+  sessions; `unlock` clears the (username, IP) throttle records for that
+  username. Both write audit events.
 - **Password change** (`POST /api/auth/password`, old + new required):
   re-hashes argon2id, revokes all *other* sessions, sets
   `must_change_password=false`, updates `password_changed_at`. The current
@@ -384,10 +410,19 @@ Lifecycle rules:
   (documented).
 - **Role change** admin↔user takes effect at next request (session lookup
   re-reads the user row); no token to re-mint since there are no JWTs.
-- **Login protections:** per-IP rate limit (reuse limiter), per-username
-  progressive lockout (5 fails → 15 min → 30 → 60, capped 1 h, reset on
-  success), `login_failed` / `login_locked` audit events with attempted
-  username (a username is not private content) and IP, but never a password.
+- **Login protections:** per-IP rate limit (reuse limiter) plus failed-attempt
+  throttling keyed on **(username, client IP)** — 5th failure starts a
+  15-minute delay for that pair, doubling per further failure, capped at 1 h,
+  reset on success. No hard username-wide lock (anyone could otherwise lock a
+  victim out by spamming their username from anywhere; and a shared office IP
+  can't freeze an account for a legitimate user at another site).
+- **`login_failed` audit privacy:** when the username matches an existing
+  account, the event records `actor_user_id` (never the raw username); for
+  unknown usernames it records **no identifier at all** — not even the typed
+  string. This keeps credential-stuffing noise out of the audit trail and
+  removes a user-enumeration surface; the (username, IP) throttle still works
+  because it reads the attempted username at request time and stores only a
+  salted hash of it, not the plaintext, in its counters.
 
 ---
 
@@ -409,13 +444,15 @@ flowchart LR
     AE --> ADM
 ```
 
-- **`audit_events`** records: `login`, `login_failed`, `login_locked`,
-  `logout`, `user_created`, `user_disabled`, `user_enabled`, `role_changed`,
-  `password_changed`, `password_reset_by_admin`, `document_uploaded`,
+- **`audit_events`** records: `login`, `login_failed` (see content rule
+  below), `login_throttled`, `logout`, `user_created`, `user_disabled`,
+  `user_enabled`, `user_deleted`, `role_changed`, `password_changed`,
+  `password_reset_by_admin`, `account_unlocked`, `document_uploaded`,
   `document_deleted`, `document_reindexed`, `document_visibility_changed`,
   `chat_asked` (route, `source_used`, outcome, duration_ms, token totals —
-  **no question, no answer, no trace, no title**), `conversation_deleted`,
-  `feedback_submitted`, `export_requested`, `account_deleted`.
+  **no question, no answer, no trace, no title**), `chat_failed`,
+  `conversation_deleted`, `feedback_submitted`, `export_requested`,
+  `account_deleted`.
   The `details` JSONB holds ids and counters only. A schema-level rule, tested
   in Phase B: nothing in this table may contain message content.
 - **Message content lives only in `messages`**, owner-scoped. Trace and
@@ -425,15 +462,22 @@ flowchart LR
 - **What admins see:** aggregate dashboards — chat volume per day, error
   rate, p50/p95 latency, token/cost totals, per-`source_used` distribution,
   document/ingest status, feedback 👍/👎 counts, active users, failed logins.
-  **Per-user question counts default to NOT exposed** — that's employee
-  monitoring wearing a metrics badge (**D3**).
+  **Per-user question counts are NOT exposed** (**D3**, resolved), and every
+  aggregate bucket is additionally suppressed unless it covers **≥ 5 users**
+  (k-anonymity floor — a "per document" or "per day" breakdown that narrows
+  to one or two people is per-user monitoring with extra steps).
+  Note: the metrics endpoint itself is **deferred** (§A12); the rule is
+  recorded now so a future implementation can't quietly regress it.
 
 **Fate of the existing `query_audit` table** (stores question text,
-`app/services/audit.py:18-24`, 8 real rows today): it cannot be carried into
-the new system — folding it in would immediately give admins read access to
-past questions. Proposal: one-time script (Phase B5) that (1) exports the
-table to an ops-held CSV outside the app and repo, (2) drops the table and
-deletes `data/audit.db` after export confirmation. **D2.**
+`app/services/audit.py:18-24`, 8 rows — per Farhad, only his own test
+questions): from B5 the legacy chat path writes **no question or trace text
+anywhere**; the table receives no new rows, and the drop (`DROP TABLE
+query_audit` + delete `data/audit.db`) runs as an explicit, operator-executed
+script in B5 — **no CSV export** (D2, amended from the original export
+proposal; the rows' owner confirmed they are his own test data). The script
+requires a confirmation flag/env (e.g. `--yes-i-understand-this-deletes-8-questions`)
+and refuses to run against a DB whose row count it can't verify first.
 
 **Application logs** gain a pinned rule: no endpoint logs request bodies.
 `routes.py:65`'s `logger.exception` keeps the traceback (framework noise, no
@@ -451,15 +495,25 @@ reduced to error class only.
   becomes org docs owned by the bootstrapped admin).
 - `private` — retrievable only by the uploader.
 
-**D4 — who may upload what.** Recommendation: **Phase B ships admin-only
-uploads (org scope)**, with the `documents` table and metadata scheme built
-so regular-user `private` uploads are a later config flip, not a rework.
+**D4 — who may upload what (resolved):** **Phase B ships admin-only uploads
+(org scope)**, with the `documents` table and metadata scheme built so
+regular-user `private` uploads are a later config flip, not a rework.
 Rationale: upload is the highest-abuse endpoint (file parsing, ingest cost,
 content trust — a user-uploaded "policy" doc becomes org-retrievable in
 current code, which would be worse); the product rules make admins the
 document managers; private uploads can follow once the file-scanning story
-exists. Would change my mind: a stated product need for personal KBs in the
-first release.
+exists.
+
+**Upload hardening (closes the still-open size cap):** today `POST /api/ingest`
+has **no size limit** — `routes.py:83` does `await file.read()` (whole body
+into RAM) and writes whatever arrives. That was flagged in the original
+hardening review (the "upload size cap" item; the M-number list in commit
+messages is incomplete — M1/M2/M4/M5 are fixed, M6 is now identified as the
+shared-namespace/no-ACL finding, and this cap was never implemented). B4 adds
+`MAX_UPLOAD_MB` (default 25): reject early on `Content-Length`, and enforce
+the cap while streaming the multipart body to disk in chunks so an oversized
+or chunked upload can't exhaust memory. Oversize → `413`. (Also noted in the
+commit plan, B4.)
 
 ### Pinecone chunk metadata and the retrieval filter
 
@@ -517,7 +571,7 @@ disappear from answers. Non-destructive plan, executed in Phase B4:
    namespace is left 100% untouched.
 2. Re-ingest: sample KB as **org** docs (owner = bootstrap admin), plus
    `uploads/Order Automation Backend — Your Build Roadmap.md` as **private**
-   to your user (it's yours; **D15** confirms or reassigns).
+   to your user (it's yours; **D15** resolved: private to you).
 3. Verify retrieval in the new namespace (live smoke check, §A11).
 4. Only after verification, a manual operator step clears the old namespace:
    `index.delete(delete_all=True, namespace="enterprise-agentic-rag")` —
@@ -551,7 +605,7 @@ role (or `password_change_required`), **404** for another user's resource
 | POST | `/api/auth/logout` | ✓ | any | Revoke session, clear cookie | 401 |
 | POST | `/api/auth/password` | ✓ | any | `{old_password, new_password}` → change own password | 401, 403 |
 | GET | `/api/me` | ✓ | any | Own profile: username, display name, role, `must_change_password` | 401 |
-| GET | `/api/me/export` | ✓ | any | GDPR export: own conversations+messages+documents meta as JSON download | 401 |
+| GET | `/api/me/export` | ✓ | any | **Deferred** — GDPR export: own conversations+messages+documents meta as JSON download | 401 |
 | DELETE | `/api/me` | ✓ | any | Delete own account: conversations, messages, private docs + vectors; audits anonymized | 401 |
 
 ### Conversations & chat (owner-only, always)
@@ -566,14 +620,53 @@ role (or `password_change_required`), **404** for another user's resource
 | GET | `/api/conversations/{id}/messages` | ✓ | any | Own messages, paginated | 401, 404 |
 | POST | `/api/conversations/{id}/messages` | ✓ | any | `{question}` → runs graph with server-built retrieval filter; persists user+assistant messages; returns assistant message (answer, citations, trace, source_used, timings, tokens) | 401, 404, 422, 429 |
 | POST | `/api/chat` | — | — | **Legacy only** during transition (§A10); removed with legacy mode | 401 |
-| POST | `/api/feedback` | ✓ | any | `{message_id, value, comment?}` on **own** message only | 401, 404 |
+| POST | `/api/feedback` | ✓ | any | **Deferred** — `{message_id, value, comment?}` on **own** message only | 401, 404 |
+
+### Chat request lifecycle — DB connection discipline (B3)
+
+The graph run can take tens of seconds. **No database connection or
+transaction may be held open across it** — a hung LLM call must not be able
+to exhaust the Postgres pool and take logins and the admin area down with it.
+
+```mermaid
+flowchart TD
+    A["request in"] --> B["TX1 (short):<br/>session lookup + throttle write-back<br/>+ ownership check<br/>+ INSERT user message<br/>COMMIT, return conn to pool"]
+    B --> C["graph runs (ask)<br/>NO DB connection held<br/>only Pinecone/OpenAI/Tavily"]
+    C -->|"ok"| D["TX2 (short):<br/>INSERT assistant message<br/>+ UPDATE conversations.last_message_at<br/>COMMIT"]
+    C -->|"exception / timeout"| E["TX2 (short):<br/>INSERT assistant message with<br/>status='error' (no stack, no content)<br/>+ audit chat_failed<br/>COMMIT"]
+    D --> F["respond 200"]
+    E --> G["respond 502<br/>'The assistant failed to answer'"]
+```
+
+Rules:
+
+- Three short transactions per chat request: **TX1** (auth + ownership +
+  persist the user's question), the graph run with **zero** DB resources
+  checked out, then **TX2** (persist the result or the failure marker).
+- Rate limiting and CSRF checks happen before TX1, on already-loaded request
+  state.
+- **If the graph fails, the user message stays.** It is the user's own data
+  and the user owns it — deleting it silently would hide their own words from
+  them, and it costs nothing: the conversation simply shows a question
+  without an answer. The assistant side is recorded as a `messages` row with
+  `status='error'` (column added for this; `content` empty, no stack trace,
+  no upstream error text — errors can echo input), so the UI can render a
+  retry affordance and the failure is *counted* (audit `chat_failed`) without
+  the error text being stored. A retry posts a new message pair; nothing is
+  auto-deleted.
+- Practical mechanics: the graph is a plain function call
+  (`ask(question, retrieval_filter)`), so the discipline is "don't pass
+  sessions into it and don't wrap it in `with session.begin()`". TX1/TX2 use
+  short-lived sessions from the request-scoped session factory; the pool's
+  `pool_pre_ping` + low `pool_timeout` make any leak loud in tests (a test
+  asserts `pool.status() == checked-out 0` after a mocked graph failure).
 
 ### Documents (user-facing)
 
 | Method | Path | Auth | Roles | Summary | Errors |
 |---|---|---|---|---|---|
 | GET | `/api/documents` | ✓ | any | Org docs + own private docs (meta only, no content) | 401 |
-| POST | `/api/documents` | ✓ | any* | Upload; scope per D4 (admin→org; user→private when enabled) | 401, 403, 422 |
+| POST | `/api/documents` | ✓ | any* | Upload; scope per D4 (admin→org; user→private when enabled). `MAX_UPLOAD_MB` enforced → **413** oversize | 401, 403, 413, 422 |
 | GET | `/api/documents/{id}` | ✓ | any | Status/meta of org doc or own private doc | 401, 404 |
 | DELETE | `/api/documents/{id}` | ✓ | any* | Delete own private doc + vectors (org docs: admin only) | 401, 403, 404 |
 
@@ -583,13 +676,14 @@ role (or `password_change_required`), **404** for another user's resource
 |---|---|---|---|---|---|
 | GET | `/api/admin/users` | ✓ | admin | List users: username, display name, role, active, created, last_login — **no conversation data** | 401, 403 |
 | POST | `/api/admin/users` | ✓ | admin | Create user (temp password) | 401, 403, 422 |
-| PATCH | `/api/admin/users/{id}` | ✓ | admin | Change role, disable/enable, display name | 401, 403, 422 |
+| PATCH | `/api/admin/users/{id}` | ✓ | admin | Change role, disable/enable, display name. **409** if the change would leave zero active admins (last-admin guard, incl. self) | 401, 403, 409, 422 |
+| DELETE | `/api/admin/users/{id}` | ✓ | admin | Delete user: cascades conversations/messages/sessions/private docs+vectors (consistency rules §A9.1). **409** last-admin guard. Double-confirm via request body flag | 401, 403, 404, 409 |
 | POST | `/api/admin/users/{id}/reset-password` | ✓ | admin | New temp password, revoke sessions | 401, 403 |
 | GET | `/api/admin/documents` | ✓ | admin | All documents incl. private: meta + ingest status (name/size/status/owner — **content never**) | 401, 403 |
 | POST | `/api/admin/documents` | ✓ | admin | Upload org document | 401, 403, 422 |
 | PATCH | `/api/admin/documents/{id}` | ✓ | admin | Set visibility — org docs only (**D11**) | 401, 403, 404 |
 | DELETE | `/api/admin/documents/{id}` | ✓ | admin | Delete any document + vectors (no content exposure) | 401, 403, 404 |
-| GET | `/api/admin/metrics` | ✓ | admin | Aggregate only: volumes, latency percentiles, error rates, tokens, feedback 👍/👎 totals, per-source distribution. No per-user series (**D3**) | 401, 403 |
+| GET | `/api/admin/metrics` | ✓ | admin | **Deferred (§A12)** — when built: aggregate only, buckets < 5 users suppressed (**D3**); no per-user series | 401, 403 |
 | GET | `/api/health` | none | — | Liveness (unchanged, `routes.py:23-25`) | — |
 
 ### Endpoints that must NOT exist (test-enforced absence)
@@ -609,27 +703,65 @@ role (or `password_change_required`), **404** for another user's resource
 
 ## A9. GDPR-minded features
 
+*(Scope note per the revised Phase B plan: the **retention sweep**, **data
+export**, **feedback endpoint**, and **admin metrics** are deferred until
+Farhad asks for them; conversation deletion and account deletion stay — they
+are product rules.)*
+
 - **Delete a conversation:** hard delete (row + messages), user-triggered,
   immediate. Vectors are not involved (chat content never enters Pinecone).
 - **Delete own account** (`DELETE /api/me`): deletes conversations, messages,
-  feedback, sessions; private documents + their vectors + stored files;
-  audits keep event rows with `actor_user_id` set NULL (counts remain,
-  attribution gone). Org documents they uploaded as admin: reassigned or
-  flagged — org knowledge shouldn't vanish because one account left
-  (**D16**).
+  feedback, sessions; private documents + their vectors + stored files
+  (consistency rules §A9.1); audits keep event rows with `actor_user_id` set
+  NULL (counts remain, attribution gone). Org documents are unaffected —
+  they are ownerless by definition (**D16**, amended: `owner_id` is always
+  NULL for org docs, so nothing is reassigned when any account, admin or
+  not, disappears).
 - **Admin deletes a user:** same cascade, executed by the admin endpoint;
-  double confirmation; `user_deleted` audit event.
+  double confirmation; `user_deleted` audit event; last-admin guard (**409**).
 - **Retention:** default **none** (keep until user deletes) + a config knob
   (`CONVERSATION_RETENTION_DAYS`, 0 = off) so a policy decision later is a
-  settings change plus a sweep job, not a migration (**D5**).
+  settings change plus a sweep job, not a migration (**D5** resolved; Farhad
+  chooses the real period before go-live — the sweep is deferred until then).
 - **Data export** (`GET /api/me/export`): JSON of conversations, messages,
   own document metadata (not document bytes in v1; documents are company
-  material — **D17**).
+  material — **D17** resolved). **Deferred** until requested.
 - **Field-level encryption of message content at rest** — listed as a later
   option (envelope encryption with a key outside the DB) if the company's
   assessment demands it; it protects backups/at-rest reads, not the running
   server or the admins who can attach a debugger. Deferred, not silently
   dropped.
+
+### A9.1 Postgres ↔ Pinecone delete consistency
+
+Deletion spans two systems with no shared transaction. Ordering principle:
+**vectors first, database rows last** — a Pinecone delete-by-filter is
+idempotent and can be retried safely, whereas an orphaned vector whose
+`doc_id` no longer exists in Postgres can never be *targeted* again.
+
+- **Delete one document** (user or admin):
+  1. TX1: `documents.status = 'deleting'` (row stays queryable for the sweep,
+     hidden from listings).
+  2. Outside TX: delete vectors by `{"doc_id": {"$eq": ...}}` — idempotent;
+     safe to repeat.
+  3. TX2: delete the row; delete `uploads/<doc_id>/` files; audit
+     `document_deleted`.
+  A sweep (part of the app's startup check, plus manual CLI) retries any row
+  stuck in `deleting` — the failure mode is a Pinecone outage, and the retry
+  is the same idempotent delete.
+- **Delete a user / account**: same protocol per private document first
+  (their private docs must go *before* the user row, while `doc_id`s are
+  still known), *then* a single cascade transaction deletes the user row
+  (sessions, conversations → messages → feedback go with it). If the process
+  dies mid-way: user still exists (rows intact), docs are in `deleting` and
+  the sweep resumes them — the flow is restartable, never half-deleted.
+- **What is deliberately NOT crash-consistent:** the reverse direction
+  (crash between cascade and vector delete) is prevented by the ordering
+  above; if an operator force-deletes a user row via SQL and strands vectors,
+  the audit `user_deleted` event records the `doc_id`s from step 1's
+  `details` JSON so a manual Pinecone cleanup by `doc_id` remains possible.
+- **Never** `delete_index()`; namespace-scoped operations only (same rule as
+  the legacy-vector plan, §A7).
 - **Not legal advice — confirm with the company's data protection contact
   (and works council, if one exists):**
   1. Is question content to OpenAI/Tavily covered by DPA/SCCs or an
@@ -646,43 +778,65 @@ role (or `password_change_required`), **404** for another user's resource
 
 ---
 
-## A10. Transition plan
+## A10. Transition plan (amended: no `AUTH_MODE` flag)
 
 The existing UI sends `X-API-Key` (`static/js/app.js:109-116`) and admin-key
 uploads (`app.js:163-166`); it must keep working until the new frontend
-exists.
+exists. Per **D8** (amended): **no `AUTH_MODE` flag** — the legacy endpoints
+simply remain in place, unchanged in shape, until an explicit removal commit
+at the end of Phase B. One code path, no mode matrix.
 
-Proposal — `AUTH_MODE=legacy|session` (env, default flips per deploy):
-
-- **`legacy`** (initial Phase B deploys): current endpoints behave exactly as
-  today — `POST /api/chat` with optional `X-API-Key`, `POST /api/ingest` with
-  `X-Admin-Key`, SQLite audit writes still going to `query_audit` **but**
-  Phase B5 strips question/trace text from what it writes even in legacy mode
-  (content removal is not deferred; compatibility of the *write path* is).
-  New tables/endpoints already exist; no user-facing login yet.
-- **`session`** (from the first deploy with the transitional UI, B8): cookie
-  auth on; `/api/chat` and `/api/ingest` keep working for one release cycle
-  so the old UI doesn't hard-break mid-rollout; a minimal login form is
-  added to the current UI (a small `templates/login.html` + fetch calls —
-  no framework needed) so real usage can move to sessions immediately.
-- **Removal:** legacy endpoints + `AUTH_MODE=legacy` + static-key settings
-  (`CHAT_API_KEY`, `ADMIN_API_KEY`) are deleted at the end of Phase B (B9),
-  after the new UI is in place. The deprecation is announced in README and
-  `.env.example` from B8 onward. **D8** = confirm that timing (default:
-  legacy dies at end of Phase B; what would extend it: the new frontend
-  slipping past B9 — then legacy lives exactly one release longer, never
-  indefinitely).
-
-Rule for the whole transition: at no point may a static key grant access to
-conversation history (it couldn't in legacy mode — history endpoints require
-session auth unconditionally).
+- **B2–B3:** legacy endpoints (`POST /api/chat` with optional `X-API-Key`,
+  `POST /api/ingest` with `X-Admin-Key`) behave as today. Retrieval is still
+  unfiltered in this window — identical to current production behavior, and
+  acceptable because no private documents exist yet (org docs only, all
+  retrievable by design). Session-auth endpoints exist alongside; nothing
+  legacy can touch them (no static key grants conversation history, ever).
+- **From B4:** *all* retrieval paths — legacy `/api/chat` included — go
+  through the server-side filter. Legacy chat uses the **org-only filter**
+  (`{"read_access": {"$in": ["org"]}}`), because a static key proves no
+  identity. Before the B4 re-ingest, old vectors carry no `read_access`
+  metadata, so the org-only filter returns nothing from the legacy namespace
+  until that namespace is re-ingested — the migration plan (§A7) sequences
+  re-ingest with the filter switch so org answers never silently vanish.
+  Legacy `/api/ingest` now routes through the documents flow as an **org
+  document with `owner_id = NULL`**.
+- **From B5:** the legacy chat path stops writing question/trace text to
+  `query_audit` entirely (rows get duration/source metadata only — the
+  content-free schema of `audit_events`); `audit_events.chat_asked` becomes
+  the record of every chat, legacy or not.
+- **B8:** minimal login form added to the current UI (a small
+  `templates/login.html` + fetch calls — no framework needed); the sidebar
+  key fields are removed from the page. Real usage moves to sessions.
+- **Removal commit (end of Phase B):** deletes `POST /api/chat`, `POST
+  /api/ingest`, the `X-API-Key`/`X-Admin-Key` checks, `CHAT_API_KEY` /
+  `ADMIN_API_KEY` settings, the `localStorage` key fields in `app.js`, and
+  fixes the stale `README.md:159` claim. Announced in README/`.env.example`
+  from B8 onward. What would extend legacy's life: only the new frontend
+  slipping — by exactly one release, never indefinitely.
 
 ---
 
 ## A11. Test plan (authorization is the core)
 
-Offline suite (existing patterns: `TestClient`, `monkeypatch`, fake
-vectorstore, `conftest.py` offline env):
+**Database rule: tests run against real Postgres — never SQLite** (JSONB,
+`inet`, native enums and `uuidv7()` must behave exactly as deployed). CI gets
+a `postgres:18` service container in **B1**. Local workflow (documented in
+`docs/dev-testing.md` and README):
+
+```bash
+docker compose up -d db          # local Postgres 18
+export TEST_DATABASE_URL=postgresql+psycopg://rag_test:rag_test@localhost:5432/rag_test
+pytest tests -q                  # offline provider mocks apply as today
+```
+
+Fixture strategy: one schema per test session (Alembic `upgrade head` against
+the test DB), each test runs inside a transaction that is rolled back — fast
+and isolated. Tests without a DB (pure-unit, existing ones) still run without
+Postgres; anything touching users/sessions/documents fails fast with a clear
+message when `TEST_DATABASE_URL` is unset. LLM/Tavily/Pinecone stay mocked
+offline (existing patterns: `TestClient`, `monkeypatch`, fake vectorstore,
+`conftest.py` empty-keys env):
 
 1. **Cross-user conversation isolation** — users A and B exist; A lists,
    reads, renames, deletes, fetches messages of, and posts to B's
@@ -706,10 +860,13 @@ vectorstore, `conftest.py` offline env):
    flowing through chat: assert the marker appears in no captured log record,
    in no `audit_events` row (scan all columns incl. `details`), in no admin
    API response; it *does* appear exactly once, in `messages`.
-8. **Lockout & rate limits** — 5 failed logins lock the username (progressive
-   windows, fake clock like `tests/test_ratelimit.py`); correct password
-   during lock → 429; success resets counter; per-user chat limit returns
-   429 with `Retry-After` while another user is unaffected.
+8. **Login throttling & rate limits** — 5 failed logins from (username, IP)
+   start the exponential delay (fake clock like `tests/test_ratelimit.py`);
+   the *same username from a different IP* is not throttled, and the *same
+   IP with a different username* is not throttled (no victim lock-out, no
+   shared-IP freeze); correct password after cooldown resets; per-user chat
+   limit returns 429 with `Retry-After` while another user is unaffected.
+   `python -m app.cli unlock` clears the records.
 9. **Password lifecycle** — temp-password user blocked with
    `password_change_required`; forced change clears flag and old sessions;
    admin reset revokes target sessions.
@@ -717,9 +874,28 @@ vectorstore, `conftest.py` offline env):
     `GET /api/documents` (404 on id); same-filename uploads by A and B produce
     distinct `doc_id`s and deleting one never removes the other's vectors
     (fake store asserts delete filter is by `doc_id`).
-11. **Cookie/CSRF hygiene** — cookie flags (httpOnly, Secure, SameSite) on
-    login response; mutating request without `X-CSRF-Token` → 403; logout
-    revokes server-side (replayed cookie → 401).
+11. **Cookie/CSRF hygiene** — cookie flags (httpOnly, SameSite, `Secure` per
+    `COOKIE_SECURE`) on login response; mutating request without
+    `X-CSRF-Token` → 403; logout revokes server-side (replayed cookie → 401).
+12. **Last-admin guard** — with exactly one active admin: demote, disable,
+    delete (by self or by the other admin-less case) → 409; with two admins,
+    demoting one succeeds and the second demotion → 409.
+13. **`login_failed` audit privacy** — failed login for a real user writes
+    `actor_user_id` and no raw username; failed login for a nonexistent
+    username writes no identifier; audit rows never contain the attempted
+    password.
+14. **Deletion consistency** — fake Pinecone store: document delete records
+    `deleting`, issues the `doc_id` filter delete, then removes the row;
+    a simulated Pinecone failure leaves the row in `deleting` and the retry
+    completes it; account delete removes private docs' vectors *before* the
+    user row disappears.
+15. **Connection discipline** — with the graph mocked to raise: after the
+    502 response, the SQLAlchemy pool reports zero checked-out connections;
+    the user message row survives; an `error`-status assistant row exists
+    with empty content.
+16. **Schema sanity** — `uuidv7()` default produces v7 UUIDs; `inet` column
+    rejects garbage; enum/CHECK constraints reject bad role/scope values;
+    org-doc `owner_id IS NULL` CHECK holds.
 
 **Live Pinecone check** — one file, `tests/test_live_pinecone.py`, skipped
 unless `RUN_LIVE_PINECONE=1` **and** `PINECONE_API_KEY` set; runs against
@@ -730,59 +906,140 @@ server, then `delete_all` in the test namespace. CI never sets the env var.
 
 ---
 
-## A12. Phase B preview (commit-level, estimated order)
+## A12. Phase B preview (amended order and scope)
 
 One step = one commit, tests first, authorization tests per step, no
-destructive actions. **STOP for your review after B2 and after B4.**
+destructive actions. **STOP for your review after B2 and after B4** (unchanged).
+Per your revision: after B6 the phase skips to the transitional UI; **admin
+aggregate metrics, the retention sweep, data export, and the feedback
+endpoint are deferred** until you ask for them (their design stays in
+§A6/§A8/§A9 so nothing has to be re-decided later).
 
 | Step | Commits (in order) | Key risks |
 |---|---|---|
-| **B1** | 1. `docker-compose.yml` (Postgres 18) + settings (`DATABASE_URL`, `AUTH_MODE`) · 2. SQLAlchemy engine/session + pin psycopg · 3. Alembic scaffold + first migration | Compose on your machine; Alembic/SQLite dev mismatch |
-| **B2** | 4. users+sessions tables/migrations · 5. argon2id + bootstrap CLI · 6. login/logout/me + CSRF · 7. lockout + login rate limit · 8. auth dependency (session lookup, disabled-user check) — **CHECKPOINT: your review** | Cookie flags in prod TLS termination (Secure behind proxy); lockout UX |
-| **B3** | 9. conversations+messages tables · 10. CRUD + ownership tests · 11. chat integration: filter parameter, message persistence, token capture · 12. per-user rate limit | Threading user context through the LangGraph state; latency of extra writes |
-| **B4** | 13. documents table + upload path (admin org scope) · 14. new chunk IDs + delete-by-doc_id · 15. server-side retrieval filter + ACL tests · 16. legacy-vector plan (new namespace, re-ingest scripts) — **CHECKPOINT: your review** | Pinecone filter behavior (mitigated by live test); re-ingest coordination with you |
-| **B5** | 17. audit_events table + writer · 18. strip content from legacy audit write path · 19. query_audit export+drop script (runs only on your confirmation — D2) · 20. log-content test | The one destructive step (guarded: export-then-drop, explicit) |
-| **B6** | 21. admin users endpoints · 22. admin documents endpoints · 23. aggregate metrics (no per-user series) · 24. forced-password-change gate | Metrics staying aggregate under future feature pressure |
-| **B7** | 25. delete conversation/account · 26. retention config + sweep · 27. export endpoint · 28. feedback endpoint | Cascade correctness; vector cleanup on account delete |
-| **B8** | 29. `AUTH_MODE` switch · 30. minimal login page + logout in current UI · 31. new-UI contract docs (`docs/api.md` generated from the table above) | Old UI breaking mid-rollout |
-| **B9** | 32. CI with Postgres service + offline/live test split · 33. legacy endpoint removal + README/`.env.example` cleanup (incl. the stale `README.md:159` claim) | Someone still on legacy keys — coordinate removal (D8) |
+| **B1** | 1. `docker-compose.yml` (Postgres 18) + settings (`DATABASE_URL`, `TEST_DATABASE_URL`, `COOKIE_SECURE`, session lifetimes, `ENABLE_WEB_FALLBACK`, `MAX_UPLOAD_MB`, `PINECONE_TEST_NAMESPACE`) + `.env.example` · 2. SQLAlchemy engine/session factory + `psycopg[binary]` pin · 3. Alembic scaffold + initial (empty-baseline) migration + uuidv7 sanity test · 4. **CI: Postgres service container** + `docs/dev-testing.md` local workflow | Compose on your machine; Alembic wiring; CI service health flakiness |
+| **B2** | 5. users+sessions tables/migrations (uuidv7 defaults, CHECKs) · 6. argon2id + `bootstrap-admin` CLI · 7. login/logout/me + CSRF · 8. (username, IP) exponential throttle + login rate limit · 9. recovery CLIs (`reset-password`, `unlock`) · 10. auth dependency (session lookup, disabled-user check) + last-admin guard helpers — **CHECKPOINT: your review** | Cookie flags in prod TLS termination (`COOKIE_SECURE` behind proxy); throttle UX |
+| **B3** | 11. conversations+messages tables/migrations · 12. CRUD + ownership (404) tests · 13. chat integration with **TX1 → graph (no DB held) → TX2** discipline (§A8 lifecycle), filter via state, token capture, `status='error'` path · 14. per-user chat rate limit | Connection-discipline regressions (pinned by pool test); threading filter through graph state |
+| **B4** | 15. documents table/migration (org ⇒ `owner_id NULL` CHECK) + upload path with `MAX_UPLOAD_MB` (413) · 16. new chunk IDs + delete-by-`doc_id` · 17. server-side retrieval filter (incl. **org-only for legacy chat**) + ACL tests · 18. legacy-vector migration: new namespace, re-ingest scripts (sample KB → org docs, your upload → private to you per **D15**) · 19. deletion consistency per §A9.1 — **CHECKPOINT: your review** | Pinecone filter behavior (mitigated by live test); re-ingest coordination with you; the org-only filter changing legacy answers if re-ingest lapses |
+| **B5** | 20. audit_events table + writer · 21. legacy chat stops writing question/trace text; legacy ingest audits metadata-only · 22. `query_audit` drop script (runs only on your explicit confirmation — **D2**) · 23. log-content test + Tavily-error-log scrub | The one destructive step (guarded, explicit, verifiable row count) |
+| **B6** | 24. admin users endpoints (create/disable/role/reset-password/delete + last-admin 409s) · 25. admin documents endpoints (list/upload/delete; no visibility promote for private docs — **D11**) · 26. forced-password-change gate · 27. account self-delete (`DELETE /api/me`) with §A9.1 consistency | Cascade correctness; vector cleanup ordering |
+| **B8** | 28. minimal login page + logout in the current UI; sidebar key fields removed · 29. new-UI contract docs (`docs/api.md` from the §A8 tables) + deprecation notes in README/`.env.example` | Old UI breaking mid-rollout |
+| **B9** | 30. **Removal commit**: legacy `/api/chat` + `/api/ingest`, static-key settings, `localStorage` key handling gone; stale `README.md:159` fixed · 31. docs sweep | Someone still on legacy keys — the removal commit is deliberately last and separate |
+
+Deferred until you ask: admin metrics endpoint (with the D3 k ≥ 5 rule),
+retention sweep + `CONVERSATION_RETENTION_DAYS` scheduling, `GET
+/api/me/export`, `POST /api/feedback` (+ `message_feedback` table migration
+lands with B3's messages migration to avoid a later table reorder, but no
+endpoint).
 
 Largest overall risks: (1) the B4 live-Pinecone behaviors — fenced behind the
-test namespace and a checkpoint; (2) B5's one-time destructive migration —
-guarded by export + explicit confirmation; (3) session cookie flags behind
-TLS termination — verified in staging before `session` mode is default.
+test namespace and a checkpoint; (2) B5's destructive step — guarded by
+explicit confirmation and a verified row count; (3) session cookie flags
+behind TLS termination — verified in staging before go-live; (4) the B4
+org-only filter making legacy answers empty if the re-ingest is skipped —
+the checkpoint exists precisely so this can't happen silently.
+
+### Impact on existing code (every file Phase B touches, and why)
+
+| File | Change | Why / step |
+|---|---|---|
+| `app/core/config.py` | Add DB/session/limit settings (`DATABASE_URL`, `TEST_DATABASE_URL`, `COOKIE_SECURE`, `SESSION_IDLE_HOURS`, `SESSION_ABSOLUTE_DAYS`, `ENABLE_WEB_FALLBACK`, `MAX_UPLOAD_MB`, `PINECONE_TEST_NAMESPACE`); **remove** `CHAT_API_KEY`/`ADMIN_API_KEY` only in the removal commit | B1, B9 |
+| `app/main.py` | Replace `init_db()` call with "run Alembic to head" (or documented `alembic upgrade` deploy step); mount `templates/login.html` route | B1, B2, B8 |
+| `app/api/routes.py` | Legacy `/api/chat` gains org-only filter (B4), stops writing content to audit (B5); legacy `/api/ingest` routes into documents flow (B4); both deleted in removal commit. New routers live in new modules (`app/api/auth.py`, `conversations.py`, `documents.py`, `admin.py`) — `routes.py` stays the legacy surface | B3–B5, B9 |
+| `app/services/audit.py` | Superseded by `app/services/audit_events.py` (new); legacy `write_audit` reduced to content-free writes from B5; module deleted in removal commit | B5, B9 |
+| `app/services/ratelimit.py` | **Unchanged class**; re-keyed call sites (user_id for chat, IP for login) | B2, B3 |
+| `app/services/ingestion.py` | `load_file`/`chunk_documents` unchanged; caller attaches `doc_id`/scope metadata after chunking | B4 |
+| `app/rag/vectorstore.py` | `get_retriever(filter)` becomes filter-required; new `_chunk_id` (doc_id-scoped); delete-by-`doc_id`; namespace constant from settings | B4 |
+| `app/rag/workflow.py` | **Unchanged graph structure** per your instruction — the only change is the retrieval filter passed into state and read by `retrieve_kb`; `ENABLE_WEB_FALLBACK=false` makes `search_web` short-circuit to the insufficient path | B3, B4 |
+| `app/rag/state.py` | `AgentState` gains `retrieval_filter: dict` | B3 |
+| `templates/index.html` | Sidebar key fields removed (B8); login page link; minimal `templates/login.html` added | B8 |
+| `static/js/app.js` | `localStorage` key handling removed (B8); fetch moves to cookie+CSRF calls as the UI evolves; legacy chat fetch keeps working until removal commit | B8, B9 |
+| `ingest_sample_kb.py` | Re-run as org documents under the new metadata scheme (or superseded by `python -m app.cli ingest-org <dir>`) | B4 |
+| `README.md`, `.env.example` | New settings documented; `LANGSMITH_TRACING=false` explicit with the third-party warning (**D13**); stale `README.md:159` dimension-claim fixed; legacy-key deprecation then removal | B1, B8, B9 |
+| `.github/workflows/ci.yml` | Postgres 18 service container + `TEST_DATABASE_URL` (moved here from the old B9) | B1 |
+| `tests/conftest.py` | Postgres test-session fixtures (schema-per-session, rollback-per-test); offline key forcing retained | B1–B3 |
+| `data/audit.db` | Dropped in B5 on your explicit confirmation (**D2**) | B5 |
+| `uploads/` | Restructured to `uploads/<doc_id>/` (B4); existing file re-ingested per **D15** | B4 |
+| `requirements.txt` | Add `alembic`, `psycopg[binary]`, `argon2-cffi` (justifications §A3) | B1, B2 |
+| `Dockerfile` | No structural change; gains nothing until deploy docs — secrets stay env-injected | — |
+
+Explicitly **unchanged**: the LangGraph graph topology and all node logic
+(except the filter read in `retrieve_kb`), the prompt texts, the markdown
+UI renderer, the Tavily error-dict handling (M1), the CI pip-audit job.
 
 ---
 
-## A13. Open questions & DECISIONS FOR FARHAD
+## A13. Decisions — resolved 2026-10-22, plus D19 (open)
 
-| # | Decision | Recommendation | What would change it |
-|---|---|---|---|
-| **D1** | Adopt PostgreSQL (compose for dev) vs. stay SQLite | **Postgres.** Sessions/lockouts/transactions; SQLAlchemy already pinned | A hard constraint forcing single-file deployment (embedded appliance) |
-| **D2** | Fate of existing `query_audit` rows (8 real questions) | Export to ops-held CSV → drop table + delete `data/audit.db` after your confirmation | A legal/audit requirement to keep question history linked to past incidents — then: offline encrypted archive, never re-imported |
-| **D3** | Per-user question counts for admins | **Not exposed**, by default ever | A written, works-cleared monitoring policy; then still aggregate-first |
-| **D4** | Who may upload | Admin-only org uploads in Phase B; user private uploads as later opt-in | Product need for personal KBs at launch |
-| **D5** | Conversation retention default | **None** (config knob ready, off) | Company retention policy deciding e.g. 90/180/365 days |
-| **D6** | Web fallback sends query text to Tavily | Keep; document in privacy notice; optional `ENABLE_WEB_FALLBACK` kill switch | A vendor contract or DPO ruling excluding Tavily |
-| **D7** | Session lifetimes | Idle 7 days, absolute 30 days | Company SSO/device-policy requirements later |
-| **D8** | When legacy keys die | End of Phase B (B9), announced from B8 | New frontend slipping — one release, not indefinite |
-| **D9** | Disabled-user data | Retain until explicit delete (suspend ≠ delete) | A policy that suspension implies deletion |
-| **D10** | Admin sees private-doc *metadata* (name/size/status) | Allowed — needed for ingest status/management per rule 2; content never | A finding that even filenames are sensitive here |
-| **D11** | Can admins promote a private doc to org (`PATCH` visibility)? | **No** — visibility changes restricted to org docs; private docs deletable, not promotable. Rule 2 vs rule 3 tension: promotion is admin-forced disclosure of content the admin can't read, without the owner's consent | You decide consent isn't a concern in this company |
-| **D12** | Private docs readable by whoever holds the Pinecone API key | Accepted + documented (§A7); namespace-per-doc or encryption only if required | A concrete threat statement about Pinecone-key holders |
-| **D13** | LangSmith | Off by default; `.env.example` labels it "sends user content to a third party" | A LangSmith enterprise/DPA setup the company approves |
-| **D14** | Multi-worker deployment | Out of scope; in-memory limiters documented as single-process | A deploy target with replicas — then shared rate-limit store first |
-| **D15** | Your existing upload (`Order Automation Backend — Your Build Roadmap.md`) | Re-ingested as **private to you** in the new namespace | You prefer it dropped or made org |
-| **D16** | Admin leaves: their org documents | Reassigned to a remaining admin (not deleted) | A policy preferring deletion of an ex-admin's uploads |
-| **D17** | Export scope | Conversations + messages + document metadata; not document bytes | DPO/company decides employees own their uploaded files |
-| **D18** | Clarify from prior session: what is "M6"? Referenced nowhere in the repo (M1/M2/M4/M5, H1–H3, L1/L4/L5 all appear in commits); assumed nothing is missing from this design because of it | — | Your answer |
+| # | Decision | Outcome |
+|---|---|---|
+| **D1** | Adopt PostgreSQL (compose for dev **and tests**) | **Accepted.** |
+| **D2** | Fate of existing `query_audit` rows | **Amended by Farhad:** no CSV export — the 8 rows are his own test questions. Drop table + delete `data/audit.db` in B5, script gated on his explicit confirmation at run time. |
+| **D3** | Per-user question counts for admins | **Accepted + tightened:** never exposed; every aggregate bucket also suppressed below **5 users** (k-anonymity floor). Metrics endpoint deferred. |
+| **D4** | Who may upload | **Accepted:** admin-only org uploads in Phase B; user private uploads later opt-in. |
+| **D5** | Conversation retention default | **Accepted:** none by default; Farhad chooses the real period before go-live (sweep deferred until then). |
+| **D6** | Web fallback / Tavily exposure | **Accepted** with `ENABLE_WEB_FALLBACK` kill switch, default on (locally on; operator may disable in prod). |
+| **D7** | Session lifetimes | **Accepted:** idle 7 days / absolute 30 days, configurable (`SESSION_IDLE_HOURS`, `SESSION_ABSOLUTE_DAYS`). |
+| **D8** | Legacy mode | **Amended by Farhad:** **no `AUTH_MODE` flag.** Legacy endpoints stay until one removal commit (end of Phase B); legacy chat uses the org-only filter from B4 and writes no question/trace text from B5. See §A10. |
+| **D9** | Disabled-user data | **Accepted:** retain until explicit delete. |
+| **D10** | Admin sees private-doc metadata | **Accepted** (name/size/status only, never content). |
+| **D11** | Promoting private docs to org | **Accepted:** forbidden — private docs deletable, not promotable. |
+| **D12** | Pinecone-key holders can read chunk text | **Accepted** + documented (§A7). |
+| **D13** | LangSmith | **Accepted + tightened:** `.env.example` sets `LANGSMITH_TRACING=false` **explicitly**, labeled as sending user content to a third party. |
+| **D14** | Multi-worker deployment | **Accepted:** out of scope; limiters documented single-process. |
+| **D15** | Existing upload (`Order Automation Backend — Your Build Roadmap.md`) | **Accepted:** re-ingested as **private to Farhad** in the new namespace. |
+| **D16** | Org document ownership | **Amended by Farhad:** org documents **always** have `owner_id = NULL` (enforced by CHECK) — nothing is ever attributed to or reassigned from an admin account. |
+| **D17** | Export scope | **Accepted:** conversations + messages + document metadata, no document bytes. (Endpoint deferred.) |
+| **D18** | What was "M6"? | **Resolved:** the original audit finding *"shared namespace, no access control on documents"* — covered by this design (§A7: per-vector ACL metadata + server-side filter). |
+| **D19** | **OPEN —** should follow-up questions use earlier conversation messages as context? | Analysis below. **Do not implement** until decided. |
 
-**Rule-conflict note (working rule 4):** no product rule contradicts another,
-but D11 is the one place rules 2 and 3 grind against each other (admin
-document management vs. content privacy) — the design resolves it as stated
-there. Rule 3 also has an honest boundary worth repeating to stakeholders:
-it binds the *application*; it cannot bind whoever has database or vendor
-access (§A2).
+### D19 analysis — conversation context for follow-ups (design only)
+
+**What it means.** A user asks "How do I connect to the VPN?", then "What
+about on Linux?". Today the second question is routed/graded/answered in
+isolation and fails. Context mode would prepend the last K messages of the
+conversation to the router/rewrite/answer prompts.
+
+**Effect on the graph.** `AgentState` gains `history: List[...]` (role +
+content pairs), loaded in **TX1** (§A8 lifecycle — this fits: history is
+loaded in the same short transaction that saves the user message, so the
+graph run itself stays DB-free). Node changes, all prompt-template level:
+`route_question`, `rewrite_query`, and the three `generate_*` nodes receive a
+formatted history block; `retrieve_kb` retrieves the *rewritten standalone
+question* (context must be folded into the search string, not into the
+embedding input directly). No new nodes, no edge changes — the topology
+survives untouched, same as the filter change.
+
+**Effect on cost.** Prompt tokens grow linearly with K turns on up to 4 LLM
+calls per request (router, grader, generator; rewriter on retry). At K=6
+messages × ~200 tokens, that's ~1.2K extra prompt tokens per call — roughly
+2–3× current prompt cost per question. Mitigations: fold history only into
+router + rewrite + final generation (skip graders), or cap at K=4. Also a
+latency cost on the router call.
+
+**Effect on privacy.** None structurally: history already lives in
+owner-only `messages`; it never reaches audit/logs. One nuance — more of the
+user's own past wording goes to OpenAI per request (§A2 vendor exposure
+grows slightly in volume, not in audience).
+
+**Effect on tests.** New cases: history loaded only from the request's own
+conversation (an authz test — user B can never trigger A's history);
+history cap enforced; router prompt contains prior turn (mocked LLM asserts
+call payload); follow-up routing regression ("what about on Linux?" → kb
+route with history, direct without); TX1 loading keeps the no-DB-during-graph
+guarantee (pool test extended).
+
+**Recommendation:** implement later as a per-request default-on with K=4 and
+graders excluded, behind `CHAT_HISTORY_TURNS` (0 = off, default off for
+launch). What would change it: evidence that follow-ups are a top use case
+from real usage (the audit `chat_asked` aggregates can't tell us this
+content-lessly — ask users instead), or a cost ceiling that rules the token
+growth out.
+
+**Rule-conflict note (working rule 4):** unchanged from the original review —
+D11 was the one rules-2-vs-3 tension and is resolved (no promotion of private
+docs). Rule 3's honest boundary bears repeating: it binds the *application*;
+it cannot bind whoever has database or vendor access (§A2).
 
 ---
 
