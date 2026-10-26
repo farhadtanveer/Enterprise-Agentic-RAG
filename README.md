@@ -87,7 +87,7 @@ Then run it:
 python run.py
 ```
 
-Open http://127.0.0.1:8080 and ask something the sample docs cover (VPN setup, password reset) or something that needs current web info — the trace panel on the right shows which path the agent took and why.
+Open http://127.0.0.1:8000 and ask something the sample docs cover (VPN setup, password reset) or something that needs current web info — the trace panel on the right shows which path the agent took and why.
 
 ## Configuration
 
@@ -134,7 +134,7 @@ Chat is rate-limited (20 requests/min/IP, `CHAT_RATE_LIMIT_PER_MINUTE`) and retu
 Chat:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/api/chat \
+curl -X POST http://127.0.0.1:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"question": "How do I connect to the company VPN?"}'
 ```
@@ -142,7 +142,7 @@ curl -X POST http://127.0.0.1:8080/api/chat \
 Ingest a document (admin key required):
 
 ```bash
-curl -X POST http://127.0.0.1:8080/api/ingest \
+curl -X POST http://127.0.0.1:8000/api/ingest \
   -H "X-Admin-Key: your-key" \
   -F "file=@your-policy.pdf"
 ```
@@ -168,7 +168,7 @@ The chat response includes the `answer`, which `source_used` produced it, the fu
 │   └── audit.db               # created on first run
 ├── templates/  static/        # chat UI (Jinja2 + vanilla JS)
 ├── ingest_sample_kb.py        # indexes data/sample_kb into Pinecone
-└── run.py                     # uvicorn entry point (port 8080)
+└── run.py                     # uvicorn entry point (port 8000, override with PORT)
 ```
 
 ## Things worth knowing
