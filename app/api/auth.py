@@ -6,8 +6,6 @@ generic message), in TIMING (dummy argon2id verify for unknown users), and
 in the audit trail (known users: actor id only; unknown: no identifier
 at all — §A6/§A11.13).
 """
-import secrets
-
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as DBSession
@@ -59,13 +57,18 @@ def _set_auth_cookies(response: Response, token: str, csrf_token: str) -> None:
     max_age = settings.session_absolute_days * 86400
     secure = settings.cookie_secure
     response.set_cookie(
-        sessions.SESSION_COOKIE, token, max_age=max_age,
+        sessions.session_cookie_name(), token, max_age=max_age,
         httponly=True, samesite="lax", secure=secure, path="/",
     )
     response.set_cookie(
-        sessions.CSRF_COOKIE, csrf_token, max_age=max_age,
+        sessions.csrf_cookie_name(), csrf_token, max_age=max_age,
         httponly=False, samesite="lax", secure=secure, path="/",
     )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(sessions.session_cookie_name(), path="/")
+    response.delete_cookie(sessions.csrf_cookie_name(), path="/")
 
 
 @router.post("/auth/login")
@@ -134,10 +137,12 @@ def login(
     if passwords.needs_rehash(user.password_hash):
         user.password_hash = passwords.hash_password(payload.password)
     # Every login issues a NEW session (no reuse) — §A3/B2 requirement 2.
-    token = sessions.create_session(
+    # The CSRF token is bound to the session (HMAC of the session id keyed
+    # on the server-only token hash) — review fix 4.
+    token, row = sessions.create_session(
         db, user.id, ip=ip, user_agent=request.headers.get("user-agent")
     )
-    csrf_token = secrets.token_urlsafe(32)
+    csrf_token = sessions.csrf_token_for(row)
     record_event(db, "login", actor_user_id=user.id, ip=ip, outcome="ok", route=LOGIN_ROUTE)
     db.commit()
 
@@ -158,8 +163,7 @@ def logout(
         db, "logout", actor_user_id=user.id, ip=_client_ip(request), outcome="ok", route=LOGOUT_ROUTE
     )
     db.commit()
-    response.delete_cookie(sessions.SESSION_COOKIE, path="/")
-    response.delete_cookie(sessions.CSRF_COOKIE, path="/")
+    _clear_auth_cookies(response)
     response.headers["Cache-Control"] = "no-store"
     return {"status": "logged_out"}
 

@@ -5,9 +5,16 @@ stores ONLY the SHA-256 hex digest — a leaked sessions table can't be
 replayed (§A2). Every login issues a NEW token (no reuse). Lifetimes:
 sliding idle (7 d default) + absolute cap (30 d default), both settings.
 
+CSRF tokens are BOUND TO THE SESSION: HMAC-SHA256(token_hash, session id).
+The key (token_hash) never leaves the server, so a CSRF value observed on
+one session is worthless on another and cannot be forged; rotation comes
+free with the session. When COOKIE_SECURE=true the cookies use the
+``__Host-`` prefix (Secure + Path=/ + no Domain — browser-enforced).
+
 No commits here: callers own the transaction boundary (§A8).
 """
 import hashlib
+import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -29,8 +36,23 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def session_cookie_name() -> str:
+    return "__Host-sid" if get_settings().cookie_secure else SESSION_COOKIE
+
+
+def csrf_cookie_name() -> str:
+    return "__Host-csrf" if get_settings().cookie_secure else CSRF_COOKIE
+
+
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def csrf_token_for(row: SessionRow) -> str:
+    """Session-bound CSRF token: HMAC keyed on the server-only token hash."""
+    return hmac.new(
+        row.token_hash.encode("utf-8"), str(row.id).encode("utf-8"), hashlib.sha256
+    ).hexdigest()
 
 
 def create_session(
@@ -39,9 +61,9 @@ def create_session(
     *,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> str:
+) -> tuple[str, SessionRow]:
     """Issue a fresh token (also on every login — never reuse), store the
-    hash; returns the raw token for the cookie."""
+    hash; returns (raw token for the cookie, the session row)."""
     settings = get_settings()
     now = utcnow()
     row = SessionRow(
@@ -54,7 +76,7 @@ def create_session(
     )
     db.add(row)
     db.flush()
-    return token
+    return token, row
 
 
 def lookup_session(db: DBSession, token: str) -> tuple[SessionRow, User] | None:

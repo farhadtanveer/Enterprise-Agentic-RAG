@@ -197,3 +197,12 @@ def test_cli_unlock_flow(cli_runner, db_session):
 
     remaining = db_session.execute(select(LoginThrottle)).scalars().all()
     assert len(remaining) == 1  # bob's row survives
+
+
+def test_cli_never_accepts_passwords_via_argv():
+    """Review fix 5: passwords come from hidden prompts/stdin only — no
+    command may expose a password parameter (shell history / ps leakage)."""
+    for name, command in cli.commands.items():
+        param_names = {p.name for p in command.params}
+        secrets_on_argv = param_names & {"password", "new_password", "temp_password", "old_password"}
+        assert not secrets_on_argv, f"{name} accepts a password via argv: {secrets_on_argv}"

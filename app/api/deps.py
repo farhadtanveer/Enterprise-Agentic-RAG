@@ -53,7 +53,7 @@ def gate_denied_handler(request: Request, exc: GateDenied) -> JSONResponse:
 def get_current_user(
     request: Request, db: DBSession = Depends(get_db)
 ) -> User:
-    token = request.cookies.get(sessions.SESSION_COOKIE)
+    token = request.cookies.get(sessions.session_cookie_name())
     if not token:
         raise HTTPException(status_code=401, detail=GENERIC_401)
     found = sessions.lookup_session(db, token)
@@ -64,12 +64,17 @@ def get_current_user(
         raise HTTPException(status_code=401, detail=GENERIC_401)
 
     if request.method in MUTATING_METHODS:
-        cookie_token = request.cookies.get(sessions.CSRF_COOKIE, "")
+        # Double-submit AND session binding: cookie and header must match
+        # each other AND the HMAC expected for THIS session — a token
+        # observed on another session (or forged) fails here (review fix 4).
+        cookie_token = request.cookies.get(sessions.csrf_cookie_name(), "")
         header_token = request.headers.get("X-CSRF-Token", "")
+        expected = sessions.csrf_token_for(row)
         if (
             not cookie_token
             or not header_token
-            or not secrets.compare_digest(cookie_token, header_token)
+            or not secrets.compare_digest(header_token, expected)
+            or not secrets.compare_digest(cookie_token, expected)
         ):
             raise GateDenied("csrf_failed")
 

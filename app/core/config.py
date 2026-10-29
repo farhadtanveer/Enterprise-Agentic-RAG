@@ -6,6 +6,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parents[2]  # Goes up 2 parent levels
 
 DEFAULT_ADMIN_KEY = "change-me"
+# Shared dev fallback for the login-throttle pepper (login_throttle uses it;
+# production validation refuses it).
+DEV_THROTTLE_PEPPER_FALLBACK = "dev-only-throttle-pepper-do-not-use-in-production"
+DEV_DATABASE_URL = "postgresql+psycopg://rag:rag@db:5432/rag"
 
 class Settings(BaseSettings):
     app_name: str = "Enterprise Agentic RAG"
@@ -87,3 +91,40 @@ def validate_chat_security(settings: Settings) -> None:
             "CHAT_API_KEY is not set; /api/chat is unauthenticated. "
             "Set CHAT_API_KEY to require the X-API-Key header."
         )
+
+
+def validate_production_settings(settings: Settings) -> None:
+    """Refuse to start outside development with dev-only safety settings."""
+    if settings.app_env == "development":
+        return
+    problems = []
+    if not settings.cookie_secure:
+        problems.append(
+            "COOKIE_SECURE=false — session cookies would travel without Secure"
+        )
+    if settings.login_throttle_pepper in ("", DEV_THROTTLE_PEPPER_FALLBACK):
+        problems.append(
+            "LOGIN_THROTTLE_PEPPER is unset or the dev fallback — throttle "
+            "counters could be reversed into usernames"
+        )
+    if _uses_dev_db_credentials(settings.database_url):
+        problems.append(
+            "DATABASE_URL uses the dev default credentials (rag/rag or empty password)"
+        )
+    if problems:
+        raise RuntimeError(
+            "Refusing to start: development settings outside APP_ENV=development:\n  - "
+            + "\n  - ".join(problems)
+        )
+
+
+def _uses_dev_db_credentials(database_url: str) -> bool:
+    if database_url == DEV_DATABASE_URL:
+        return True
+    try:
+        from sqlalchemy.engine import make_url
+
+        url = make_url(database_url)
+    except Exception:  # malformed URLs fail later at engine creation anyway
+        return False
+    return url.password in (None, "", "rag")

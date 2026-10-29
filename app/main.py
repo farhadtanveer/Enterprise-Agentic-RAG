@@ -6,7 +6,13 @@ from fastapi.templating import Jinja2Templates
 from app.api.auth import router as auth_router
 from app.api.deps import GateDenied, gate_denied_handler
 from app.api.routes import router
-from app.core.config import get_settings, BASE_DIR, validate_admin_key, validate_chat_security
+from app.core.config import (
+    get_settings,
+    BASE_DIR,
+    validate_admin_key,
+    validate_chat_security,
+    validate_production_settings,
+)
 from app.core.logging import configure_logging
 from app.services.audit import init_db
 
@@ -15,6 +21,7 @@ configure_logging()
 settings = get_settings()
 validate_admin_key(settings)
 validate_chat_security(settings)
+validate_production_settings(settings)
 # Legacy SQLite query_audit init: stays until B5 stops legacy content writes
 # and the removal commit deletes the module (docs/backend-design.md §A12).
 init_db()

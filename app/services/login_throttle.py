@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session as DBSession
 
-from app.core.config import get_settings
+from app.core.config import DEV_THROTTLE_PEPPER_FALLBACK, get_settings
 from app.models.login_throttle import LoginThrottle
 
 THRESHOLD_FAILURES = 5
@@ -29,8 +29,6 @@ BASE_DELAY = timedelta(minutes=15)
 MAX_DELAY = timedelta(hours=1)
 
 logger = logging.getLogger(__name__)
-# Fixed fallback so dev works out of the box; production sets a real pepper.
-_DEV_FALLBACK_PEPPER = "dev-only-throttle-pepper-do-not-use-in-production"
 _warned = False
 
 
@@ -43,7 +41,7 @@ def _username_hash(username: str) -> str:
     settings = get_settings()
     pepper = settings.login_throttle_pepper
     if not pepper:
-        pepper = _DEV_FALLBACK_PEPPER
+        pepper = DEV_THROTTLE_PEPPER_FALLBACK
         if not _warned:
             logger.warning(
                 "LOGIN_THROTTLE_PEPPER is unset — using a fixed dev fallback. "

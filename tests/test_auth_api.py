@@ -102,7 +102,7 @@ def test_secure_flag_follows_cookie_secure_setting(client, db_session, monkeypat
     monkeypatch.setattr(auth_api.settings, "cookie_secure", True)
     make_user(db_session)
     r = login(client)
-    sid = [c for c in set_cookies_of(r) if c.startswith("sid=")][0]
+    sid = [c for c in set_cookies_of(r) if c.startswith("__Host-sid=")][0]
     assert "Secure" in sid  # flag present when the setting says so
 
 
@@ -349,7 +349,7 @@ def test_password_change_revokes_other_sessions_keeps_current(client, db_session
     login(client, "multi")  # session 1 in the jar
     sid1 = client.cookies.get("sid")
     csrf1 = client.cookies.get("csrf")
-    token2 = sessions.create_session(db_session, user.id)
+    token2 = sessions.create_session(db_session, user.id)[0]
     db_session.commit()
     _switch_sid(client, token2)
     assert client.get("/api/me").status_code == 200  # session 2 live
@@ -395,6 +395,85 @@ def test_password_change_validation(client, db_session):
 
 
 # --- legacy surface untouched (B2 requirement 7 / D8) --------------------------
+
+
+# --- review fixes -------------------------------------------------------------
+
+
+def test_csrf_body_token_matches_session_hmac_and_cookie(client, db_session):
+    """Review fix 4: the login body's csrf_token IS the session-bound HMAC
+    the dependency expects."""
+    make_user(db_session)
+    r = login(client)
+    row = db_session.execute(select(SessionRow)).scalar_one()
+    assert r.json()["csrf_token"] == sessions.csrf_token_for(row)
+
+
+def test_csrf_from_another_session_is_rejected(client, db_session):
+    """Review fix 4: a csrf value observed on session 1 is worthless on
+    session 2 — binding to the session kills token replay across sessions."""
+    user = make_user(db_session, "two-sessions")
+    login(client, "two-sessions")
+    csrf1 = client.cookies.get("csrf")
+    token2, _row2 = sessions.create_session(db_session, user.id)
+    db_session.commit()
+    _switch_sid_style(client, token2)
+    r = client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf1})
+    assert r.status_code == 403
+    assert r.json() == {"code": "csrf_failed"}
+
+
+def _switch_sid_style(client, token):
+    client.cookies.delete("sid")
+    client.cookies.set("sid", token)
+
+
+def test_host_prefixed_cookie_names_when_secure(client, db_session, monkeypatch):
+    """Review fix 4: COOKIE_SECURE=true → __Host-sid / __Host-csrf."""
+    monkeypatch.setattr(auth_api.settings, "cookie_secure", True)
+    make_user(db_session)
+    r = login(client)
+    names = [c.split(";")[0].split("=")[0] for c in set_cookies_of(r)]
+    assert "__Host-sid" in names
+    assert "__Host-csrf" in names
+    sid = [c for c in set_cookies_of(r) if c.startswith("__Host-sid=")][0]
+    assert "Secure" in sid  # __Host- requires Secure; the browser enforces it
+
+
+def test_throttle_parity_unknown_and_known_usernames(client, db_session):
+    """Review fix 2: unknown usernames get the SAME 429/Retry-After lockout
+    as real ones (5 failures arm it, 6th attempt throttled for both)."""
+    make_user(db_session, "parity-real", "the right password 42")
+    for _ in range(5):
+        assert login(client, "parity-ghost", "wrong password 123").status_code == 401
+    r_ghost = login(client, "parity-ghost", "wrong password 123")
+    assert r_ghost.status_code == 429
+    ghost_retry = int(r_ghost.headers["Retry-After"])
+
+    for _ in range(5):
+        assert login(client, "parity-real", "wrong password 123").status_code == 401
+    r_real = login(client, "parity-real", "wrong password 123")
+    assert r_real.status_code == 429
+    real_retry = int(r_real.headers["Retry-After"])
+
+    assert 890 <= ghost_retry <= 900
+    assert abs(ghost_retry - real_retry) <= 2  # identical arming behavior
+
+
+def test_password_spraying_blocked_per_ip(client, db_session, monkeypatch):
+    """Review fix 3: many usernames × one attempt each from one IP hits the
+    per-IP overall login limit (the DB throttle is per-(username, IP) and
+    would never fire for single attempts)."""
+    from app.services.ratelimit import SlidingWindowLimiter
+
+    monkeypatch.setattr(auth_api, "login_limiter", SlidingWindowLimiter(5))
+    for i in range(5):
+        make_user(db_session, f"spray-{i}", f"passphrase number {i} x")
+        r = login(client, f"spray-{i}", "one wrong guess per user")
+        assert r.status_code == 401  # each individually below the throttle
+    r = login(client, "spray-0", "sixth attempt from the same IP")
+    assert r.status_code == 429
+    assert r.headers["Retry-After"] == "60"
 
 
 def test_legacy_endpoints_still_registered(client):
