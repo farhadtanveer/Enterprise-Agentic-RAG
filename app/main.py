@@ -4,6 +4,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from app.api.auth import router as auth_router
+from app.api.conversations import router as conversations_router
 from app.api.deps import GateDenied, gate_denied_handler
 from app.api.routes import router
 from app.core.config import (
@@ -58,6 +59,7 @@ app.add_exception_handler(GateDenied, gate_denied_handler)
 
 app.include_router(router)
 app.include_router(auth_router)
+app.include_router(conversations_router)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 

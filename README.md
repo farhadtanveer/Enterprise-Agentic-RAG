@@ -93,40 +93,40 @@ Open http://127.0.0.1:8000 and ask something the sample docs cover (VPN setup, p
 
 All settings live in `app/core/config.py` and can be overridden via `.env`:
 
-| Variable | Required | Default | What it does |
-|---|---|---|---|
-| `OPENAI_API_KEY` | yes | — | Powers the LLM (routing, grading, answering) and embeddings |
-| `PINECONE_API_KEY` | yes | — | Vector store for the private KB |
-| `TAVILY_API_KEY` | for web fallback | — | Web search when KB evidence is weak |
-| `ADMIN_API_KEY` | recommended | `change-me` | Required by `POST /api/ingest` |
-| `OPENAI_MODEL` | no | `gpt-4o-mini` | Chat model |
-| `EMBEDDING_MODEL` | no | `text-embedding-3-small` | Dimension map lives in `app/rag/vectorstore.py` |
-| `PINECONE_INDEX_NAME` | no | `enterprise-agentic-rag` | Index is auto-created |
-| `PINECONE_NAMESPACE` | no | `enterprise-agentic-rag` | |
-| `TOP_K` | no | `4` | Chunks fetched per retrieval |
-| `MAX_RETRIES` | no | `1` | Query-rewrite retries before giving up |
-| `INDEX_READY_TIMEOUT_SECONDS` | no | `120` | How long to wait for a fresh Pinecone index before failing |
-| `LLM_TIMEOUT_SECONDS` | no | `60` | Per-call timeout for OpenAI requests |
-| `WEB_SEARCH_TIMEOUT_SECONDS` | no | `30` | Deadline for a Tavily search |
-| `CHAT_API_KEY` | no | *(unset)* | When set, `/api/chat` requires a matching `X-API-Key` header. The web UI has a key field for this. **Deprecated** — removed with the legacy endpoints at the end of the multi-user rollout |
-| `CHAT_RATE_LIMIT_PER_MINUTE` | no | `20` | Chat requests per minute per IP (0 disables) |
-| `DATABASE_URL` | no | `postgresql+psycopg://rag:rag@db:5432/rag` | Postgres 18 on the compose network (the dev DB has no host port — see `docs/dev-testing.md`) |
-| `TEST_DATABASE_URL` | for tests | *(unset)* | Tests refuse to run without it; never points at the dev DB (see `docs/dev-testing.md`) |
-| `COOKIE_SECURE` | no | `true` | Session cookie Secure flag; `false` only for local plain-http dev |
-| `SESSION_IDLE_HOURS` | no | `168` | Sliding session idle timeout |
-| `SESSION_ABSOLUTE_DAYS` | no | `30` | Hard session cap from login |
-| `ENABLE_WEB_FALLBACK` | no | `true` | `false` = the web-fallback node short-circuits; query text never reaches Tavily |
-| `MAX_UPLOAD_MB` | no | `25` | Upload size cap; oversize uploads get `413` |
-| `CONVERSATION_RETENTION_DAYS` | no | `0` | 0 = keep until the user deletes (retention sweep deferred) |
-| `PINECONE_TEST_NAMESPACE` | no | `multi-user-test` | Namespace for the opt-in live Pinecone check |
-| `LANGSMITH_TRACING` | no | `false` | Keep `false`: `true` sends every question, retrieved chunk, and answer to LangSmith's cloud (third party). Enable only in staging with synthetic data |
+| Variable                      | Required         | Default                                    | What it does                                                                                                                                                                               |
+| ----------------------------- | ---------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `OPENAI_API_KEY`              | yes              | —                                          | Powers the LLM (routing, grading, answering) and embeddings                                                                                                                                |
+| `PINECONE_API_KEY`            | yes              | —                                          | Vector store for the private KB                                                                                                                                                            |
+| `TAVILY_API_KEY`              | for web fallback | —                                          | Web search when KB evidence is weak                                                                                                                                                        |
+| `ADMIN_API_KEY`               | recommended      | `change-me`                                | Required by `POST /api/ingest`                                                                                                                                                             |
+| `OPENAI_MODEL`                | no               | `gpt-4o-mini`                              | Chat model                                                                                                                                                                                 |
+| `EMBEDDING_MODEL`             | no               | `text-embedding-3-small`                   | Dimension map lives in `app/rag/vectorstore.py`                                                                                                                                            |
+| `PINECONE_INDEX_NAME`         | no               | `enterprise-agentic-rag`                   | Index is auto-created                                                                                                                                                                      |
+| `PINECONE_NAMESPACE`          | no               | `enterprise-agentic-rag`                   |                                                                                                                                                                                            |
+| `TOP_K`                       | no               | `4`                                        | Chunks fetched per retrieval                                                                                                                                                               |
+| `MAX_RETRIES`                 | no               | `1`                                        | Query-rewrite retries before giving up                                                                                                                                                     |
+| `INDEX_READY_TIMEOUT_SECONDS` | no               | `120`                                      | How long to wait for a fresh Pinecone index before failing                                                                                                                                 |
+| `LLM_TIMEOUT_SECONDS`         | no               | `60`                                       | Per-call timeout for OpenAI requests                                                                                                                                                       |
+| `WEB_SEARCH_TIMEOUT_SECONDS`  | no               | `30`                                       | Deadline for a Tavily search                                                                                                                                                               |
+| `CHAT_API_KEY`                | no               | _(unset)_                                  | When set, `/api/chat` requires a matching `X-API-Key` header. The web UI has a key field for this. **Deprecated** — removed with the legacy endpoints at the end of the multi-user rollout |
+| `CHAT_RATE_LIMIT_PER_MINUTE`  | no               | `20`                                       | Chat requests per minute per IP (0 disables)                                                                                                                                               |
+| `DATABASE_URL`                | no               | `postgresql+psycopg://rag:rag@db:5432/rag` | Postgres 18 on the compose network (the dev DB has no host port — see `docs/dev-testing.md`)                                                                                               |
+| `TEST_DATABASE_URL`           | for tests        | _(unset)_                                  | Tests refuse to run without it; never points at the dev DB (see `docs/dev-testing.md`)                                                                                                     |
+| `COOKIE_SECURE`               | no               | `true`                                     | Session cookie Secure flag; `false` only for local plain-http dev                                                                                                                          |
+| `SESSION_IDLE_HOURS`          | no               | `168`                                      | Sliding session idle timeout                                                                                                                                                               |
+| `SESSION_ABSOLUTE_DAYS`       | no               | `30`                                       | Hard session cap from login                                                                                                                                                                |
+| `ENABLE_WEB_FALLBACK`         | no               | `true`                                     | `false` = the web-fallback node short-circuits; query text never reaches Tavily                                                                                                            |
+| `MAX_UPLOAD_MB`               | no               | `25`                                       | Upload size cap; oversize uploads get `413`                                                                                                                                                |
+| `CONVERSATION_RETENTION_DAYS` | no               | `0`                                        | 0 = keep until the user deletes (retention sweep deferred)                                                                                                                                 |
+| `PINECONE_TEST_NAMESPACE`     | no               | `multi-user-test`                          | Namespace for the opt-in live Pinecone check                                                                                                                                               |
+| `LANGSMITH_TRACING`           | no               | `false`                                    | Keep `false`: `true` sends every question, retrieved chunk, and answer to LangSmith's cloud (third party). Enable only in staging with synthetic data                                      |
 
 ## API
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/health` | Health check |
-| `POST` | `/api/chat` | Ask a question, get an answer + trace + citations |
+| Method | Path          | Description                                           |
+| ------ | ------------- | ----------------------------------------------------- |
+| `GET`  | `/api/health` | Health check                                          |
+| `POST` | `/api/chat`   | Ask a question, get an answer + trace + citations     |
 | `POST` | `/api/ingest` | Upload a document (PDF, TXT, MD, DOCX) into the index |
 
 Chat is rate-limited (20 requests/min/IP, `CHAT_RATE_LIMIT_PER_MINUTE`) and returns `429` with a `Retry-After` header when exceeded. Auth is opt-in: set `CHAT_API_KEY` and clients must send a matching `X-API-Key` header — the bundled web UI has a key field in the sidebar for exactly this.
