@@ -65,7 +65,13 @@ def lookup_session(db: DBSession, token: str) -> tuple[SessionRow, User] | None:
     returned so the caller can apply it).
     """
     row = db.execute(
-        select(SessionRow).where(SessionRow.token_hash == _hash_token(token))
+        select(SessionRow)
+        .where(SessionRow.token_hash == _hash_token(token))
+        # refresh from the result even if the identity map already holds
+        # this row: Core-style UPDATEs (revoke_user_sessions) don't touch
+        # cached attributes, and a long-lived session must not see a stale
+        # revoked/expiry state
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if row is None:
         return None

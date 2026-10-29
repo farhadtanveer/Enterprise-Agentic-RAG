@@ -19,7 +19,9 @@ import app.models  # noqa: F401 — fills Base.metadata for autogenerate
 
 config = context.config
 
-if config.config_file_name is not None:
+# Respect the standard opt-out (used by app startup migrations) so the
+# alembic.ini logging config can't rewire the application's loggers.
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata

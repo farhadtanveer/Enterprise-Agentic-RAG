@@ -3,16 +3,18 @@ services:
     image: postgres:18-alpine
     environment:
       # Interpolated from the project .env (compose reads it automatically).
-      # The rag/rag fallback is a DEV-ONLY credential for a 127.0.0.1-bound
-      # container; override POSTGRES_PASSWORD in .env for anything real, and
-      # keep DATABASE_URL/TEST_DATABASE_URL in sync when you do.
+      # POSTGRES_PASSWORD is REQUIRED (no fallback): a silent default invites
+      # "works on my machine" credential drift. The pgdata volume only picks
+      # the password up on FIRST init — changing it later also needs
+      # `docker compose exec db psql -U rag -d rag -c "ALTER USER ..."` (or a
+      # volume reset), and DATABASE_URL/TEST_DATABASE_URL kept in sync.
       POSTGRES_USER: ${POSTGRES_USER:-rag}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (see .env.example)}
       POSTGRES_DB: ${POSTGRES_DB:-rag}
     # NO host port publish on purpose: this Docker Desktop build stalls
     # loopback publishes (~130 s per query) and a bare binding would expose
-    # the dev DB to the LAN. Everything needing the DB — tests, Alembic, the
-    # app itself from B2 — runs on the compose network (`db:5432`).
+    # the dev DB to the LAN. Everything needing the DB — tests, Alembic,
+    # the app — runs on the compose network (`db:5432`).
     # Interactive access: docker compose exec db psql -U rag -d rag
     # (docs/dev-testing.md has the temporary-publish recipe for host tools).
     volumes:
@@ -27,6 +29,44 @@ services:
       timeout: 3s
       retries: 10
 
+  # Dev app: lean runtime image, repo bind-mounted over /app, uvicorn --reload
+  # (watchfiles is in requirements.txt). Talks to the DB over the compose
+  # network only — same no-publish posture as the db. The published port is
+  # loopback-only; docs/dev-testing.md records the loopback-vs-bare
+  # measurement for this machine before you change it to a bare binding.
+  app:
+    build:
+      context: .
+      # Explicit so dev can never drift onto a heavier stage.
+      target: runtime
+    profiles: ["dev"]
+    environment:
+      # Composed from the same POSTGRES_* values the db uses, so app and db
+      # credentials cannot drift apart. As a real env var this also overrides
+      # anything in the bind-mounted .env (pydantic-settings precedence).
+      # A POSTGRES_PASSWORD with URL-special chars must be %-encoded here
+      # (see .env.example).
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (see .env.example)}@db:5432/${POSTGRES_DB:-rag}
+      # Default false for plain-http dev (browsers reject Secure cookies on
+      # http://127.0.0.1:8081); set COOKIE_SECURE=true in .env to override.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Dev convenience: alembic upgrade head at startup (§A12 — production
+      # keeps the documented deploy step).
+      RUN_MIGRATIONS_ON_STARTUP: "true"
+    ports:
+      # Loopback-only on purpose (LAN would expose the dev app + its
+      # DB-adjacent surface). Bare "8081:8080" is NOT an acceptable default.
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    # python -m (not the console script) so the repo root lands on sys.path
+    # and `import app` resolves — same as CI and the host workflow.
+    # Port literal (not ${PORT}): it must match the ports publish above.
+    command: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload"]
+
   # Test runner: same Python 3.13 + pinned deps as the app image, plus dev
   # tools; talks to the DB over the compose network only. Opt-in via profile
   # so `docker compose up` never builds it.
@@ -36,8 +76,10 @@ services:
       target: test
     profiles: ["test"]
     environment:
-      TEST_DATABASE_URL: postgresql+psycopg://rag:rag@db:5432/rag_test
-      ALEMBIC_DATABASE_URL: postgresql+psycopg://rag:rag@db:5432/rag_test
+      # Interpolated (not hardcoded rag:rag) so a .env password change
+      # propagates; fails loudly when POSTGRES_PASSWORD is unset.
+      TEST_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (see .env.example)}@db:5432/rag_test
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (see .env.example)}@db:5432/rag_test
     depends_on:
       db:
         condition: service_healthy

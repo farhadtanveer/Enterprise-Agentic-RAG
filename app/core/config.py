@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # Empty = fixed dev fallback (with a startup warning). Set a real secret
     # in production so the throttle table can't be reversed into usernames.
     login_throttle_pepper: str = ""
+    # Dev convenience: run `alembic upgrade head` at startup so the compose
+    # app always has the current schema. Production keeps the documented
+    # `alembic upgrade` deploy step (§A12 change table, app/main.py).
+    run_migrations_on_startup: bool = False
 
     model_config = SettingsConfigDict(env_file=str(BASE_DIR / ".env"), extra="ignore")
 
