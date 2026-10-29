@@ -15,6 +15,7 @@ from sqlalchemy import create_engine
 
 from app.core.config import get_settings
 from app.core.db import Base
+import app.models  # noqa: F401 — fills Base.metadata for autogenerate
 
 config = context.config
 

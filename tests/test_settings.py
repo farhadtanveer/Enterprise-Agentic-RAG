@@ -10,7 +10,10 @@ def _settings(**kwargs):
 def test_database_settings_defaults(monkeypatch):
     # Clear the env the suite itself may run with: we're asserting the CODE
     # defaults here, and TEST_DATABASE_URL legitimately overrides them.
+    # COOKIE_SECURE is cleared because conftest forces it false so the
+    # TestClient cookie jar works over plain http (see conftest.py).
     monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("COOKIE_SECURE", raising=False)
     s = _settings()
     assert s.database_url.startswith("postgresql+psycopg://")
     assert s.test_database_url == ""  # never silently point tests at the dev DB
