@@ -18,7 +18,7 @@ os.environ["COOKIE_SECURE"] = "false"
 import pytest
 from pathlib import Path
 from sqlalchemy import event
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, SessionTransactionOrigin
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 
@@ -66,7 +66,14 @@ def db_session(pg_engine):
 
     @event.listens_for(session, "after_transaction_end")
     def restart_savepoint(sess, transaction):  # pragma: no cover - plumbing
-        if transaction.nested and not transaction._parent_nil:
+        # SQLAlchemy 2.1: origin is public (the old _parent_nil attr is gone).
+        # Restart only real savepoints of a still-active session — never
+        # during close() teardown.
+        if (
+            transaction.origin is SessionTransactionOrigin.BEGIN_NESTED
+            and transaction.parent is not None
+            and sess.is_active
+        ):
             sess.begin_nested()
 
     yield session
@@ -94,7 +101,11 @@ def joined_session_factory(db_session):
 
         @event.listens_for(s, "after_transaction_end")
         def restart(sess, transaction):  # pragma: no cover - plumbing
-            if transaction.nested and not transaction._parent_nil:
+            if (
+                transaction.origin is SessionTransactionOrigin.BEGIN_NESTED
+                and transaction.parent is not None
+                and sess.is_active
+            ):
                 sess.begin_nested()
 
         return s
