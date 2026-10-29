@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     # D5: 0 = keep conversations until the user deletes them (sweep deferred).
     conversation_retention_days: int = 0
     pinecone_test_namespace: str = "multi-user-test"
+    # --- B2 login protection (docs/backend-design.md §A3/§A5) ---
+    # Per-IP sliding window on POST /api/auth/login (0 = off).
+    login_rate_limit_per_minute: int = 10
+    # Pepper for hashing attempted usernames in the login-throttle counters.
+    # Empty = fixed dev fallback (with a startup warning). Set a real secret
+    # in production so the throttle table can't be reversed into usernames.
+    login_throttle_pepper: str = ""
 
     model_config = SettingsConfigDict(env_file=str(BASE_DIR / ".env"), extra="ignore")
 
