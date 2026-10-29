@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import PureWindowsPath
 from typing import Literal
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
 from langgraph.graph import StateGraph, START, END
@@ -78,7 +79,7 @@ def route_after_router(state: AgentState) -> Literal["retrieve_kb", "direct_answ
     return "retrieve_kb" if state["source_used"] == "kb" else "direct_answer"
 
 def retrieve_kb(state: AgentState):
-    docs = get_retriever().invoke(state["current_query"])
+    docs = get_retriever(state.get("retrieval_filter")).invoke(state["current_query"])
     return {"kb_docs": docs, "trace": add_trace(state, f"Private KB retrieval → {len(docs)} chunks")}
 
 def grade_kb(state: AgentState):
@@ -242,7 +243,40 @@ def build_graph():
 
 agent_graph = build_graph()
 
-def ask(question: str):
+
+class TokenUsageCollector(BaseCallbackHandler):
+    """Accumulates LLM token usage across every node via the LangChain
+    callback channel — zero changes to node logic (B3 item 13).
+
+    Plugged into ``agent_graph.invoke(..., config={"callbacks": [...]})``;
+    ``on_llm_end`` fires once per LLM call, including the
+    ``with_structured_output`` router/grader calls.
+    """
+
+    def __init__(self):
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+
+    def on_llm_end(self, response, **kwargs) -> None:
+        usage = (getattr(response, "llm_output", None) or {}).get("token_usage") or {}
+        self.prompt_tokens += usage.get("prompt_tokens") or 0
+        self.completion_tokens += usage.get("completion_tokens") or 0
+        self.total_tokens += usage.get("total_tokens") or 0
+
+    def as_dict(self) -> dict:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
+def ask(question: str, retrieval_filter: dict | None = None) -> dict:
+    """Run the graph. ``retrieval_filter`` is built server-side from the
+    session user (§A7) — never from client input; None keeps today's
+    unfiltered behavior until B4 turns the ACL on."""
+    usage = TokenUsageCollector()
     initial: AgentState = {
         "question": question,
         "current_query": question,
@@ -255,5 +289,8 @@ def ask(question: str):
         "retry_count": 0,
         "trace": [],
         "citations": [],
+        "retrieval_filter": retrieval_filter,
     }
-    return agent_graph.invoke(initial)
+    result = agent_graph.invoke(initial, config={"callbacks": [usage]})
+    result["token_usage"] = usage.as_dict()
+    return result

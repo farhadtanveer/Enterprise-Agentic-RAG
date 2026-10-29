@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import List, Literal, Optional
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
 from langchain_core.documents import Document
@@ -21,3 +21,7 @@ class AgentState(TypedDict):
     retry_count: int
     trace: List[str]
     citations: List[dict]
+    # B3: set once from the authenticated user (§A7: built server-side, the
+    # client sends nothing). None until B4 turns the ACL on; retrieve_kb
+    # passes it to the retriever as-is.
+    retrieval_filter: Optional[dict]

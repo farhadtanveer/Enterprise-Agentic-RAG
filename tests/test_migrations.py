@@ -216,6 +216,59 @@ def test_audit_event_defaults_and_outcome_check():
         conn.close()
 
 
+def test_message_role_and_status_checks_reject_bad_values():
+    from datetime import datetime, timezone
+
+    from sqlalchemy import insert
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.conversation import Conversation
+    from app.models.message import Message
+    from app.models.user import User
+
+    conn = _engine().connect()
+    try:
+        user_id = conn.execute(
+            insert(User).values(username="b3-conv-probe", password_hash="x", role="user")
+        ).inserted_primary_key[0]
+        conv_id = conn.execute(
+            insert(Conversation).values(user_id=user_id)
+        ).inserted_primary_key[0]
+        now = datetime.now(timezone.utc)
+        conn.execute(
+            insert(Message).values(
+                conversation_id=conv_id, msg_role="system", msg_status="ok", content="x"
+            )
+        )
+        pytest.fail("msg_role CHECK did not reject 'system'")
+    except IntegrityError:
+        pass
+    finally:
+        conn.rollback()
+        conn.close()
+
+    conn = _engine().connect()
+    try:
+        user_id = conn.execute(
+            insert(User).values(username="b3-conv-probe", password_hash="x", role="user")
+        ).inserted_primary_key[0]
+        conv_id = conn.execute(
+            insert(Conversation).values(user_id=user_id)
+        ).inserted_primary_key[0]
+        now = datetime.now(timezone.utc)
+        conn.execute(
+            insert(Message).values(
+                conversation_id=conv_id, msg_role="user", msg_status="pending", content="x"
+            )
+        )
+        pytest.fail("msg_status CHECK did not reject 'pending'")
+    except IntegrityError:
+        pass
+    finally:
+        conn.rollback()
+        conn.close()
+
+
 def test_downgrade_to_base_unstamps_the_database(alembic_cfg):
     from alembic import command
     from sqlalchemy import create_engine

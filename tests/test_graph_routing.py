@@ -63,7 +63,7 @@ class _FakeTavily:
 
 def test_greeting_routes_to_direct_answer(monkeypatch):
     monkeypatch.setattr(wf, "_llm", _FakeLLM(route="direct"))
-    monkeypatch.setattr(wf, "get_retriever", lambda: _FakeRetriever())
+    monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
     out = wf.ask("thanks, you are great")
@@ -76,7 +76,7 @@ def test_greeting_routes_to_direct_answer(monkeypatch):
 
 def test_good_kb_evidence_answers_from_private_kb(monkeypatch):
     monkeypatch.setattr(wf, "_llm", _FakeLLM(route="kb", grades=("good",)))
-    monkeypatch.setattr(wf, "get_retriever", lambda: _FakeRetriever())
+    monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
     out = wf.ask("How do I connect to the company VPN?")
@@ -88,7 +88,7 @@ def test_good_kb_evidence_answers_from_private_kb(monkeypatch):
 
 def test_weak_kb_good_web_answers_from_web(monkeypatch):
     monkeypatch.setattr(wf, "_llm", _FakeLLM(route="kb", grades=("weak", "good")))
-    monkeypatch.setattr(wf, "get_retriever", lambda: _FakeRetriever())
+    monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
     out = wf.ask("What is the latest Teams outage guidance?")
@@ -102,7 +102,7 @@ def test_all_weak_and_retries_exhausted_stops_honestly(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "max_retries", 1)
     monkeypatch.setattr(wf, "_llm", _FakeLLM(route="kb", grades=("weak", "weak")))
-    monkeypatch.setattr(wf, "get_retriever", lambda: _FakeRetriever())
+    monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
     out = wf.ask("obscure question")
@@ -118,7 +118,7 @@ def test_rewrite_loop_is_bounded_even_with_bad_grades(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "max_retries", 2)
     monkeypatch.setattr(wf, "_llm", _FakeLLM(route="kb", grades=("weak", "weak", "weak")))
-    monkeypatch.setattr(wf, "get_retriever", lambda: _FakeRetriever())
+    monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
     out = wf.ask("obscure question")

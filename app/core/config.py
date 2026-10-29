@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     # app always has the current schema. Production keeps the documented
     # `alembic upgrade` deploy step (§A12 change table, app/main.py).
     run_migrations_on_startup: bool = False
+    # --- B3 chat caps (review requirement e; all configurable) ---
+    max_message_length: int = 3000  # chars per question (422 beyond)
+    max_messages_per_conversation: int = 200  # 409 beyond
+    max_conversations_per_user: int = 100  # 409 beyond
 
     model_config = SettingsConfigDict(env_file=str(BASE_DIR / ".env"), extra="ignore")
 

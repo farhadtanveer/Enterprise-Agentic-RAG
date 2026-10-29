@@ -117,8 +117,13 @@ def get_vectorstore():
 
 
 
-def get_retriever():
-    return get_vectorstore().as_retriever(search_kwargs={"k": settings.top_k})
+def get_retriever(filter: dict | None = None):
+    """B3: optional metadata filter (Pinecone $-syntax, §A7). B4 makes this
+    parameter REQUIRED and builds the ACL filter server-side per user."""
+    search_kwargs: dict = {"k": settings.top_k}
+    if filter:
+        search_kwargs["filter"] = filter
+    return get_vectorstore().as_retriever(search_kwargs=search_kwargs)
 
 
 

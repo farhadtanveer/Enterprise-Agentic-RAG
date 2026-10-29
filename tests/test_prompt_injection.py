@@ -7,7 +7,7 @@ from test_graph_routing import _FakeLLM, _FakeRetriever, _FakeTavily
 def test_web_content_is_fenced_in_grade_and_generate_prompts(monkeypatch):
     fake_llm = _FakeLLM(route="kb", grades=("weak", "good"))
     monkeypatch.setattr(wf, "_llm", fake_llm)
-    monkeypatch.setattr(wf, "get_retriever", lambda: _FakeRetriever())
+    monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
     out = wf.ask("What is the latest Teams outage guidance?")
