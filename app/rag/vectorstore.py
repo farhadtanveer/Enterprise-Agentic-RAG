@@ -1,11 +1,14 @@
 import hashlib
+import logging
 import time
 from pinecone import Pinecone , ServerlessSpec
+from pinecone.exceptions import NotFoundException
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from app.core.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 _embeddings = None
@@ -159,14 +162,26 @@ def add_documents(chunks, *, doc_id: str, scope: str, owner_id: str | None, sour
         chunk.metadata.update(
             doc_id=doc_id,
             scope=scope,
-            owner_id=str(owner_id) if owner_id else None,
             read_access=read_access,
             source=source_name,  # display name — drives citation titles
         )
-    store.index.delete(
-        filter={"doc_id": {"$eq": doc_id}},
-        namespace=settings.pinecone_namespace,
-    )
+        if owner_id:
+            # Pinecone metadata REJECTS null values (found live, 2026-11-05:
+            # every org ingest 400'd on owner_id=None). Org docs omit the key
+            # entirely — D16 ownerlessness lives in Postgres' CHECK; access
+            # control rides on read_access, never on owner_id.
+            chunk.metadata["owner_id"] = str(owner_id)
+    try:
+        store.index.delete(
+            filter={"doc_id": {"$eq": doc_id}},
+            namespace=settings.pinecone_namespace,
+        )
+    except NotFoundException:
+        # Pinecone 404s a delete-by-filter against a namespace that has no
+        # vectors yet (found live, 2026-11-05: the FIRST ingest into a fresh
+        # namespace would crash). Nothing to delete — the replace step is a
+        # no-op by definition.
+        logger.info("no existing vectors for doc %s (empty namespace) — replace delete skipped", doc_id)
     ids = [_chunk_id(doc_id, c) for c in chunks]
     return store.add_documents(chunks, ids=ids)
 
@@ -174,7 +189,10 @@ def add_documents(chunks, *, doc_id: str, scope: str, owner_id: str | None, sour
 def delete_document_vectors(doc_id: str) -> None:
     """Idempotent delete-by-doc_id (§A9.1: vectors first, rows last — a
     Pinecone outage leaves the retry safe to repeat)."""
-    get_vectorstore().index.delete(
-        filter={"doc_id": {"$eq": str(doc_id)}},
-        namespace=settings.pinecone_namespace,
-    )
+    try:
+        get_vectorstore().index.delete(
+            filter={"doc_id": {"$eq": str(doc_id)}},
+            namespace=settings.pinecone_namespace,
+        )
+    except NotFoundException:
+        logger.info("no vectors for doc %s (empty/unknown namespace) — delete is a no-op", doc_id)

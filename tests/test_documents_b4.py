@@ -203,12 +203,54 @@ def test_add_documents_attaches_acl_metadata_and_replaces_by_doc_id():
         assert c.metadata["source"] == "roadmap.md"
     org_chunks, org_ids = store.added[1]
     assert org_chunks[0].metadata["read_access"] == ["org"]
-    assert org_chunks[0].metadata["owner_id"] is None  # D16: org docs ownerless
+    # Pinecone metadata cannot hold null (live-found 2026-11-05): org docs
+    # OMIT owner_id entirely — D16 ownerlessness lives in the Postgres CHECK.
+    assert "owner_id" not in org_chunks[0].metadata
     # ids derive from doc_id + start + content
     expected = hashlib.sha256(
         "11111111-1111-4111-8111-111111111111\x000\x00chunk one".encode()
     ).hexdigest()
     assert private_ids[0] == expected
+
+
+def test_first_ingest_into_empty_namespace_survives_pinecone_404(monkeypatch):
+    """Found live (2026-11-05): Pinecone 404s a delete-by-filter against a
+    namespace with no vectors, which crashed the FIRST document ingest into
+    a fresh namespace. The replace delete must treat that as a no-op."""
+    from app.rag import vectorstore as vs
+    from pinecone.exceptions import NotFoundException
+
+    class _EmptyIndex:
+        def __init__(self):
+            self.delete_calls = 0
+
+        def delete(self, filter, namespace):
+            self.delete_calls += 1
+            raise NotFoundException("Namespace not found")
+
+    class _EmptyStore:
+        def __init__(self):
+            self.index = _EmptyIndex()
+            self.added = []
+
+        def add_documents(self, chunks, ids):
+            self.added.append((list(chunks), list(ids)))
+            return ids
+
+    store = _EmptyStore()
+    with patch.object(vs, "get_vectorstore", return_value=store):
+        class C:
+            def __init__(self, content):
+                self.page_content = content
+                self.metadata = {"start_index": "0"}
+
+        ids = vs.add_documents(
+            [C("first chunk ever")],
+            doc_id="44444444-4444-4444-8444-444444444444",
+            scope="org", owner_id=None, source_name="first.txt",
+        )
+    assert store.index.delete_calls == 1  # the replace delete ran, 404 swallowed
+    assert len(ids) == 1 and store.added[0][1] == ids  # the chunks STILL got added
 
 
 def test_fake_acl_store_semantics_org_vs_private():
