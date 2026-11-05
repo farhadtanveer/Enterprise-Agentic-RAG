@@ -10,7 +10,7 @@ client = TestClient(app)
 
 def _enable_chat_key(monkeypatch, key):
     monkeypatch.setattr(get_settings(), "chat_api_key", key)
-    monkeypatch.setattr(routes, "ask", lambda q: {"answer": "ok", "source_used": "direct",
+    monkeypatch.setattr(routes, "ask", lambda q, retrieval_filter=None: {"answer": "ok", "source_used": "direct",
                                                  "trace": [], "citations": [], "current_query": q})
 
 

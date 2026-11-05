@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import app.api.routes as routes
 from app.core.config import Settings, get_settings, validate_admin_key
+from app.core.db import get_db
 from app.main import app
 
 client = TestClient(app)
@@ -31,17 +32,26 @@ def test_real_key_never_raises_even_in_production():
     validate_admin_key(_settings(app_env="production", admin_api_key="a-real-key"))
 
 
-def test_ingest_key_check(monkeypatch, tmp_path):
+def test_ingest_key_check(monkeypatch, tmp_path, db_session):
+    # B4: legacy ingest routes through the documents flow, so it needs a DB
+    # session — pinned to the rollback-per-test fixture, never the dev DB.
     s = get_settings()
     monkeypatch.setattr(s, "admin_api_key", "test-admin-key")
     monkeypatch.setattr(s, "upload_dir", str(tmp_path))
     monkeypatch.setattr(routes, "load_file", lambda p: [])
     monkeypatch.setattr(routes, "chunk_documents", lambda docs: [])
-    monkeypatch.setattr(routes, "add_documents", lambda chunks: [])
+    monkeypatch.setattr(routes, "add_documents", lambda chunks, **kwargs: [])
 
-    files = {"file": ("notes.txt", b"hello")}
-    ok = client.post("/api/ingest", headers={"X-Admin-Key": "test-admin-key"}, files=files)
-    bad = client.post("/api/ingest", headers={"X-Admin-Key": "wrong-key"}, files=files)
+    def _pinned_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _pinned_db
+    try:
+        files = {"file": ("notes.txt", b"hello")}
+        ok = client.post("/api/ingest", headers={"X-Admin-Key": "test-admin-key"}, files=files)
+        bad = client.post("/api/ingest", headers={"X-Admin-Key": "wrong-key"}, files=files)
+    finally:
+        app.dependency_overrides.pop(get_db, None)
 
     assert ok.status_code == 200
     assert ok.json()["file"] == "notes.txt"

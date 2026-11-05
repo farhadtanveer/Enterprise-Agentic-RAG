@@ -7,6 +7,7 @@ no network.
 from langchain_core.documents import Document
 
 import app.rag.workflow as wf
+from app.services.retrieval import ORG_ONLY_FILTER
 from app.core.config import get_settings
 from app.rag.state import EvidenceGrade, RouteDecision
 
@@ -66,7 +67,7 @@ def test_greeting_routes_to_direct_answer(monkeypatch):
     monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
-    out = wf.ask("thanks, you are great")
+    out = wf.ask("thanks, you are great", retrieval_filter=ORG_ONLY_FILTER)
 
     assert out["source_used"] == "direct"
     assert out["answer"] == "final answer text"
@@ -79,7 +80,7 @@ def test_good_kb_evidence_answers_from_private_kb(monkeypatch):
     monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
-    out = wf.ask("How do I connect to the company VPN?")
+    out = wf.ask("How do I connect to the company VPN?", retrieval_filter=ORG_ONLY_FILTER)
 
     assert out["source_used"] == "private_kb"
     assert out["citations"][0]["title"] == "handbook.md"
@@ -91,7 +92,7 @@ def test_weak_kb_good_web_answers_from_web(monkeypatch):
     monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
-    out = wf.ask("What is the latest Teams outage guidance?")
+    out = wf.ask("What is the latest Teams outage guidance?", retrieval_filter=ORG_ONLY_FILTER)
 
     assert out["source_used"] == "web_search"
     assert out["retry_count"] == 0  # web succeeded first try, no rewrite
@@ -105,7 +106,7 @@ def test_all_weak_and_retries_exhausted_stops_honestly(monkeypatch):
     monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
-    out = wf.ask("obscure question")
+    out = wf.ask("obscure question", retrieval_filter=ORG_ONLY_FILTER)
 
     assert out["source_used"] == "insufficient_evidence"
     assert out["retry_count"] == 1  # exactly one rewrite round (max_retries=1)
@@ -121,7 +122,7 @@ def test_rewrite_loop_is_bounded_even_with_bad_grades(monkeypatch):
     monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
 
-    out = wf.ask("obscure question")
+    out = wf.ask("obscure question", retrieval_filter=ORG_ONLY_FILTER)
 
     assert out["source_used"] == "insufficient_evidence"
     assert out["retry_count"] == 2

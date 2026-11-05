@@ -18,7 +18,10 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     pinecone_api_key: str = ""
     pinecone_index_name: str = "enterprise-agentic-rag"
-    pinecone_namespace: str = "enterprise-agentic-rag"
+    # B4 namespace migration (§A7): new metadata scheme lives in `rag-v2`;
+    # the old namespace is left 100% untouched until the operator clears it
+    # AFTER verifying re-ingest (manual, namespace-scoped only).
+    pinecone_namespace: str = "rag-v2"
     embedding_model: str = "text-embedding-3-small"
     openai_model: str = "gpt-4o-mini"
     top_k: int = 4

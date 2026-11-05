@@ -2,14 +2,18 @@ import logging
 import secrets
 import time
 from pathlib import Path
-from fastapi import APIRouter, Request, UploadFile, File, HTTPException, Header
+from fastapi import APIRouter, Depends, Request, UploadFile, File, HTTPException, Header
 from pydantic import BaseModel, Field
 from app.core.config import get_settings
+from app.core.db import get_db
 from app.rag.workflow import ask
 from app.rag.vectorstore import add_documents
+from app.services import documents as documents_service
 from app.services.ingestion import load_file, chunk_documents, SUPPORTED
 from app.services.audit import write_audit
+from app.services.audit_events import record_event
 from app.services.ratelimit import SlidingWindowLimiter
+from app.services.retrieval import ORG_ONLY_FILTER
 
 router = APIRouter(prefix="/api")
 settings = get_settings()
@@ -41,7 +45,9 @@ def chat(payload: ChatRequest, request: Request, x_api_key: str = Header(default
         )
     try:
         started = time.perf_counter()
-        result = ask(payload.question)
+        # D8/§A7: a static key proves no identity — legacy retrieval is
+        # org-only from B4 on (private chunks never match this filter).
+        result = ask(payload.question, retrieval_filter=ORG_ONLY_FILTER)
         duration_ms = int((time.perf_counter() - started) * 1000)
         write_audit(
             payload.question,
@@ -68,20 +74,73 @@ def chat(payload: ChatRequest, request: Request, x_api_key: str = Header(default
 
 
 @router.post("/ingest")
-async def ingest(file: UploadFile = File(...), x_admin_key: str = Header(default="")):
+async def ingest(
+    file: UploadFile = File(...),
+    x_admin_key: str = Header(default=""),
+    db=Depends(get_db),
+):
+    """Legacy admin ingest (D8): unchanged contract, but from B4 it routes
+    through the documents flow — an org document with owner_id = NULL,
+    streamed under MAX_UPLOAD_MB, ACL metadata attached (§A7/§A10)."""
     # encode() so odd header bytes can't raise TypeError inside compare_digest
     if not secrets.compare_digest(
         x_admin_key.encode("utf-8"), settings.admin_api_key.encode("utf-8")
     ):
         raise HTTPException(status_code=401, detail="Invalid admin key")
-    suffix = Path(file.filename or "").suffix.lower()
+    display_name = Path(file.filename or "").name
+    suffix = Path(display_name).suffix.lower()
     if suffix not in SUPPORTED:
         raise HTTPException(status_code=400, detail=f"Supported: {', '.join(sorted(SUPPORTED))}")
-    upload_dir = Path(settings.upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    dest = upload_dir / Path(file.filename).name
-    dest.write_bytes(await file.read())
-    docs = load_file(dest)
-    chunks = chunk_documents(docs)
-    ids = add_documents(chunks)
-    return {"message": "Document indexed", "file": dest.name, "chunks": len(chunks), "ids_created": len(ids)}
+
+    # reject early on Content-Length when the client told the truth (§A7)
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    if file.size is not None and file.size > max_bytes:
+        raise HTTPException(status_code=413, detail="File exceeds MAX_UPLOAD_MB")
+
+    doc = documents_service.create_document(
+        db, scope="org", owner_id=None, display_name=display_name,
+        storage_path="", checksum="", size_bytes=0, mime_suffix=suffix or None,
+    )
+    try:
+        dest, size, checksum = documents_service.save_upload_stream(
+            file.file, dest_dir=Path(settings.upload_dir) / str(doc.id),
+            display_name=display_name,
+        )
+    except documents_service.UploadTooLarge:
+        db.rollback()  # the pending row dies with the request transaction
+        raise HTTPException(status_code=413, detail="File exceeds MAX_UPLOAD_MB") from None
+    doc.storage_path = str(dest)
+    doc.size_bytes = size
+    doc.checksum = checksum
+    db.flush()
+    try:
+        loaded = load_file(dest)
+        chunks = chunk_documents(loaded)
+        ids = add_documents(
+            chunks, doc_id=doc.id, scope="org", owner_id=None, source_name=display_name
+        )
+    except Exception:
+        documents_service.mark_failed(db, doc, "ingest_failed")
+        record_event(
+            db, "document_uploaded", object_type="document", object_id=doc.id,
+            outcome="error", route="/api/ingest",
+            details={"scope": "org", "via": "legacy_ingest", "error_class": "ingest_failed"},
+        )
+        db.commit()
+        logger.exception("legacy ingest failed")
+        raise HTTPException(status_code=500, detail="Ingest failed") from None
+
+    documents_service.attach_ingest_result(db, doc, len(chunks))
+    record_event(
+        db, "document_uploaded", object_type="document", object_id=doc.id,
+        outcome="ok", route="/api/ingest",
+        details={"scope": "org", "via": "legacy_ingest", "chunks": len(chunks)},
+    )
+    db.commit()
+    return {
+        "message": "Document indexed",
+        "file": display_name,
+        "chunks": len(chunks),
+        "ids_created": len(ids),
+        "document_id": str(doc.id),
+    }

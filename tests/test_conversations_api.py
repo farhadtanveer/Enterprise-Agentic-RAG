@@ -83,7 +83,7 @@ def fake_ask_result(question, **overrides):
 def ok_ask(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        conv_api, "ask", lambda q: calls.append(q) or fake_ask_result(q)
+        conv_api, "ask", lambda q, retrieval_filter=None: calls.append(q) or fake_ask_result(q)
     )
     return calls
 
@@ -361,7 +361,7 @@ def test_chat_failure_stores_error_marker_and_allows_retry(client, db_session, m
     csrf = login(client, "unlucky")
     conv = client.post("/api/conversations", json={}, headers={"X-CSRF-Token": csrf}).json()
 
-    def boom(question):
+    def boom(question, retrieval_filter=None):
         raise RuntimeError(f"pinecone exploded for: {question}")
 
     monkeypatch.setattr(conv_api, "ask", boom)
@@ -387,7 +387,7 @@ def test_chat_failure_stores_error_marker_and_allows_retry(client, db_session, m
     assert "printer" not in f"{ev.event_type}|{ev.route}|{str(ev.details)}"
 
     # (c): retry works once the graph recovers
-    monkeypatch.setattr(conv_api, "ask", lambda q: fake_ask_result(q))
+    monkeypatch.setattr(conv_api, "ask", lambda q, retrieval_filter=None: fake_ask_result(q))
     r = client.post(
         f"/api/conversations/{conv['id']}/messages",
         json={"question": "retry the printer question"},
@@ -416,7 +416,7 @@ def test_no_question_text_in_audit_or_logs_marker_test(client, db_session, caplo
     assert r.status_code == 200
 
     # failure path with the marker inside the exception text
-    def boom(q):
+    def boom(q, retrieval_filter=None):
         raise RuntimeError(f"upstream exploded mentioning {MARKER}")
 
     monkeypatch.setattr(conv_api, "ask", boom)
@@ -512,7 +512,7 @@ def test_tx_discipline_pool_released_during_graph(pg_engine, monkeypatch):
 
         seen = {}
 
-        def fake_ask(question):
+        def fake_ask(question, retrieval_filter=None):
             seen["checkedout"] = get_engine(test_url).pool.checkedout()
             return fake_ask_result(question)
 

@@ -24,7 +24,7 @@ def test_chat_writes_attribution_and_duration(monkeypatch, tmp_path):
     db = tmp_path / "audit.db"
     monkeypatch.setattr(get_settings(), "audit_db_path", str(db))
     audit.init_db()
-    monkeypatch.setattr(routes, "ask", lambda q: {"answer": "ok", "source_used": "direct",
+    monkeypatch.setattr(routes, "ask", lambda q, retrieval_filter=None: {"answer": "ok", "source_used": "direct",
                                                  "trace": ["Router → DIRECT"], "citations": [],
                                                  "current_query": q})
 

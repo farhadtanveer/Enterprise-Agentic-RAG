@@ -46,7 +46,7 @@ def test_limiter_keys_are_independent():
 
 def test_chat_endpoint_returns_429(monkeypatch):
     monkeypatch.setattr(routes, "chat_limiter", SlidingWindowLimiter(limit=1))
-    monkeypatch.setattr(routes, "ask", lambda q: {"answer": "ok", "source_used": "direct",
+    monkeypatch.setattr(routes, "ask", lambda q, retrieval_filter=None: {"answer": "ok", "source_used": "direct",
                                                  "trace": [], "citations": [], "current_query": q})
 
     first = client.post("/api/chat", json={"question": "hi there"})

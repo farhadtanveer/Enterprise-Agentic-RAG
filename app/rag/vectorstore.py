@@ -117,36 +117,64 @@ def get_vectorstore():
 
 
 
-def get_retriever(filter: dict | None = None):
-    """B3: optional metadata filter (Pinecone $-syntax, §A7). B4 makes this
-    parameter REQUIRED and builds the ACL filter server-side per user."""
-    search_kwargs: dict = {"k": settings.top_k}
-    if filter:
-        search_kwargs["filter"] = filter
-    return get_vectorstore().as_retriever(search_kwargs=search_kwargs)
+def get_retriever(filter: dict):
+    """Retriever WITH a server-built metadata filter (B4: filter-REQUIRED —
+    §A7: "there is no code path where retrieval runs unfiltered").
+
+    The filter uses Pinecone array semantics: ``read_access`` is per-vector
+    ``["org"]`` or ``[<owner_id>]``, and ``$in`` matches if ANY element
+    matches — i.e. exactly ``scope == org OR owner == me``.
+    """
+    if not filter:
+        raise ValueError(
+            "get_retriever requires a server-built ACL filter (§A7) — "
+            "unfiltered retrieval is not a code path this application has."
+        )
+    return get_vectorstore().as_retriever(search_kwargs={"k": settings.top_k, "filter": filter})
 
 
 
-def _chunk_id(chunk) -> str:
-    # Deterministic: re-ingesting unchanged content upserts over itself.
-    # Source is part of the hash so identical text in different documents
-    # can never collide. start_index disambiguates repeated chunks within
-    # one document.
-    source = str(chunk.metadata.get("source", ""))
+def _chunk_id(doc_id: str, chunk) -> str:
+    # Deterministic, DOC-SCOPED (M2 follow-up, §A7): re-ingesting unchanged
+    # content upserts over itself; two users uploading the same filename can
+    # never collide or delete each other's chunks. start_index disambiguates
+    # repeated chunks within one document.
     start = str(chunk.metadata.get("start_index", ""))
-    return hashlib.sha256(f"{source}\x00{start}\x00{chunk.page_content}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        f"{doc_id}\x00{start}\x00{chunk.page_content}".encode("utf-8")
+    ).hexdigest()
 
 
-def add_documents(chunks):
+def add_documents(chunks, *, doc_id: str, scope: str, owner_id: str | None, source_name: str):
+    """Attach the ACL metadata scheme (§A7) and index the document's chunks.
+
+    Replace semantics per DOCUMENT: wipe this doc_id's vectors before
+    adding, so a changed re-upload never leaves stale chunks behind —
+    delete-by-doc_id can never touch another document's chunks.
+    """
     store = get_vectorstore()
-    # Replace semantics: wipe each source's existing vectors before adding,
-    # so a changed re-upload doesn't leave stale chunks behind.
-    sources = {str(c.metadata.get("source", "")) for c in chunks}
-    for src in sources:
-        if src:
-            store.index.delete(
-                filter={"source": {"$eq": src}},
-                namespace=settings.pinecone_namespace,
-            )
-    ids = [_chunk_id(c) for c in chunks]
+    doc_id = str(doc_id)
+    read_access = ["org"] if scope == "org" else [str(owner_id)]
+    for chunk in chunks:
+        chunk.metadata.update(
+            doc_id=doc_id,
+            scope=scope,
+            owner_id=str(owner_id) if owner_id else None,
+            read_access=read_access,
+            source=source_name,  # display name — drives citation titles
+        )
+    store.index.delete(
+        filter={"doc_id": {"$eq": doc_id}},
+        namespace=settings.pinecone_namespace,
+    )
+    ids = [_chunk_id(doc_id, c) for c in chunks]
     return store.add_documents(chunks, ids=ids)
+
+
+def delete_document_vectors(doc_id: str) -> None:
+    """Idempotent delete-by-doc_id (§A9.1: vectors first, rows last — a
+    Pinecone outage leaves the retry safe to repeat)."""
+    get_vectorstore().index.delete(
+        filter={"doc_id": {"$eq": str(doc_id)}},
+        namespace=settings.pinecone_namespace,
+    )

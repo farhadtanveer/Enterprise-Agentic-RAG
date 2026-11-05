@@ -21,6 +21,7 @@ from app.rag.workflow import ask
 from app.services import conversations as conv_service
 from app.services.audit_events import record_event
 from app.services.ratelimit import SlidingWindowLimiter
+from app.services.retrieval import retrieval_filter_for
 
 router = APIRouter(prefix="/api", tags=["conversations"])
 settings = get_settings()
@@ -200,9 +201,10 @@ def send_message(
     _no_store(response)
 
     # --- graph run: zero DB resources held ---------------------------------
+    # the retrieval filter is built HERE, from the session user (§A7)
     started = time.perf_counter()
     try:
-        result = ask(payload.question)
+        result = ask(payload.question, retrieval_filter=retrieval_filter_for(user))
     except Exception:
         # static log line only — no exception text can echo the question (g)
         logger.error("chat graph failed for a conversation message")

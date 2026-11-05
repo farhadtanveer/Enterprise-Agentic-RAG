@@ -10,6 +10,7 @@ from app.models.audit_event import AuditEvent
 from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.message_feedback import MessageFeedback
+from app.models.document import Document
 
 __all__ = [
     "User",
@@ -19,4 +20,5 @@ __all__ = [
     "Conversation",
     "Message",
     "MessageFeedback",
+    "Document",
 ]
