@@ -27,8 +27,13 @@ def get_engine(url: str | None = None):
 
     pool_pre_ping replaces connections killed by idle timeouts instead of
     raising on first use after a gap.
+    hide_parameters=True keeps bound values (message content, usernames)
+    out of logged statements and exception text (privacy rule §A6: no
+    content in logs) — proven behaviorally by tests/test_db.py.
     """
-    return create_engine(url or get_settings().database_url, pool_pre_ping=True)
+    return create_engine(
+        url or get_settings().database_url, pool_pre_ping=True, hide_parameters=True
+    )
 
 
 @lru_cache(maxsize=None)

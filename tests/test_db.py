@@ -52,3 +52,32 @@ def test_session_roundtrip_and_close(engine):
         # close() releases the connection back to the pool; the session is
         # reset (no open transaction) and reusable.
         assert not session.in_transaction()
+
+
+def test_engine_hides_bound_parameters_from_errors():
+    """Privacy rule: question/answer text must never reach logs or exception
+    messages. Bound DB values are the last place content could leak through a
+    raised StatementError — hide_parameters=True renders placeholders only.
+    The contrast engine (no flag) proves the assertion is meaningful."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.exc import DBAPIError
+
+    from app.core.db import get_engine
+
+    marker = "SECRET-MARKER-DB-CONTENT"
+    bad_sql = text("INSERT INTO definitely_missing_table VALUES (:content)")
+
+    # contrast: a plain engine LEAKS the bound value into the error text —
+    # this documents why hide_parameters matters (test-only engine).
+    plain = create_engine("sqlite://")
+    with pytest.raises(DBAPIError) as leaked:
+        with plain.connect() as c:
+            c.execute(bad_sql, [{"content": marker}])
+    assert marker in str(leaked.value)
+
+    # the app factory: same failure, value gone
+    app_engine = get_engine("sqlite:///file:hideparams-test?mode=memory&uri=true")
+    with pytest.raises(DBAPIError) as hidden:
+        with app_engine.connect() as c:
+            c.execute(bad_sql, [{"content": marker}])
+    assert marker not in str(hidden.value)
