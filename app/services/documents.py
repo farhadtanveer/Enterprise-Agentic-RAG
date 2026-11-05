@@ -13,7 +13,6 @@ B6 wires the delete endpoints).
 """
 import hashlib
 import logging
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -99,7 +98,13 @@ def save_upload_stream(fileobj, *, dest_dir: Path, display_name: str) -> tuple[P
                 digest.update(chunk)
                 out.write(chunk)
     except Exception:
-        shutil.rmtree(dest_dir, ignore_errors=True)
+        # working-tree safety rule: on failure remove only the PARTIAL FILE
+        # this call created — never a directory. The (now empty) per-document
+        # directory stays; pruning empty dirs is an operator action.
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("could not remove partial upload %s", dest)
         raise
     return dest, size, digest.hexdigest()
 
@@ -123,20 +128,25 @@ def complete_delete(db: DBSession, doc_id: UUID, *, actor_user_id=None) -> None:
         )
         db.flush()
         if doc.storage_path:
-            # Defense-in-depth (2026-11-05 incident): storage.parent must be
-            # a real uploads/<doc_id>/ directory. A malformed storage_path
-            # (e.g. a bare relative name whose parent resolves to "." — the
-            # process CWD) must never be rmtree'd: skip with an error and
-            # let the DB row delete proceed.
-            allowed_root = Path(get_settings().upload_dir).resolve()
-            target = storage.parent.resolve()
-            if target == allowed_root or allowed_root not in target.parents:
-                logger.error(
-                    "complete_delete refusing to rmtree %s — not under upload_dir %s",
-                    target, allowed_root,
-                )
-            else:
-                shutil.rmtree(target, ignore_errors=True)
+            # Working-tree safety rule (2026-11-05 incident): code that
+            # deletes files may delete a SINGLE FILE whose resolved path is
+            # inside the configured upload_dir — never a directory derived
+            # from DB values or settings defaults. The per-document
+            # directory may remain (empty); pruning empty dirs is an
+            # operator action, not something DB-driven code does.
+            try:
+                target = storage.resolve()
+                allowed_root = Path(get_settings().upload_dir).resolve()
+                if target.is_file() and allowed_root in target.parents:
+                    target.unlink(missing_ok=True)
+                else:
+                    logger.error(
+                        "complete_delete refusing to unlink %s — not a file "
+                        "under upload_dir %s",
+                        target, allowed_root,
+                    )
+            except OSError:
+                logger.exception("complete_delete could not remove the stored file")
 
 
 def list_stuck_deletes(db: DBSession) -> list[Document]:

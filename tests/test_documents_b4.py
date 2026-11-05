@@ -336,9 +336,10 @@ def test_legacy_ingest_rejects_oversize_early_and_mid_stream(client, db_session,
             headers={"X-Admin-Key": "test-admin-key"},
         )
     assert r.status_code == 413
-    # no document row, no leftover partial file
+    # no document row, no leftover partial FILE (the per-document directory
+    # itself is never deleted — working-tree safety rule)
     assert db_session.execute(select(Document)).scalars().all() == []
-    assert not any(uploads.iterdir()) if uploads.exists() else True
+    assert not any(p.is_file() for p in uploads.rglob("*")) if uploads.exists() else True
 
 
 # --- deletion consistency (§A9.1, item 19) ---------------------------------------
@@ -364,7 +365,10 @@ def test_complete_delete_removes_row_and_files(db_session, tmp_path, monkeypatch
     docs_service.complete_delete(db_session, doc.id)
     db_session.commit()
     assert docs_service.get_document(db_session, doc.id) is None
-    assert not doc_dir.exists()  # uploads/<doc_id>/ removed with the row
+    # working-tree safety rule: only the single FILE is deleted (its path
+    # resolved inside upload_dir) — never the DB-derived directory itself
+    assert not (doc_dir / "gone.txt").exists()
+    assert doc_dir.exists()  # the directory stays; pruning is an operator action
     ev = db_session.execute(
         select(AuditEvent).where(AuditEvent.event_type == "document_deleted")
     ).scalar_one()
@@ -390,7 +394,7 @@ def test_complete_delete_refuses_paths_outside_upload_dir(db_session, tmp_path, 
     db_session.commit()
     assert docs_service.get_document(db_session, doc.id) is None  # row gone
     assert (foreign / "f.txt").exists()  # foreign file untouched
-    assert "refusing to rmtree" in caplog.text
+    assert "refusing to unlink" in caplog.text
 
 
 def test_sweep_vectors_before_rows_and_survives_outage(db_session, tmp_path, monkeypatch):
@@ -440,4 +444,5 @@ def test_sweep_vectors_before_rows_and_survives_outage(db_session, tmp_path, mon
     db_session.commit()
     assert completed == 1 and len(attempts) == 2
     assert docs_service.get_document(db_session, doc.id) is None  # row gone AFTER vectors
-    assert not storage_dir.exists()  # the stored file went with the row
+    assert not storage_file.exists()  # the single stored file went with the row
+    assert storage_dir.exists()  # the DB-derived directory itself is never deleted
