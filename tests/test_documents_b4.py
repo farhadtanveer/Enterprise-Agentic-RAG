@@ -329,6 +329,28 @@ def test_complete_delete_removes_row_and_files(db_session, tmp_path, monkeypatch
     assert ev.outcome == "ok"
 
 
+def test_complete_delete_refuses_paths_outside_upload_dir(db_session, tmp_path, monkeypatch, caplog):
+    """Defense-in-depth (2026-11-05 incident): a malformed storage_path whose
+    parent is NOT the configured uploads/<doc_id>/ tree must never be
+    rmtree'd — the row still goes, the foreign directory stays."""
+    monkeypatch.setattr(get_settings(), "upload_dir", str(tmp_path / "uploads"))
+    foreign = tmp_path / "elsewhere" / "doc-x"
+    foreign.mkdir(parents=True)
+    (foreign / "f.txt").write_text("keep me")
+    doc = docs_service.create_document(
+        db_session, scope="org", owner_id=None, display_name="f.txt",
+        storage_path=str(foreign / "f.txt"),
+        checksum="d" * 64, size_bytes=6, mime_suffix=".txt",
+    )
+    db_session.commit()
+
+    docs_service.complete_delete(db_session, doc.id)
+    db_session.commit()
+    assert docs_service.get_document(db_session, doc.id) is None  # row gone
+    assert (foreign / "f.txt").exists()  # foreign file untouched
+    assert "refusing to rmtree" in caplog.text
+
+
 def test_sweep_vectors_before_rows_and_survives_outage(db_session, tmp_path, monkeypatch):
     """§A9.1 ordering + restartability: the vector delete runs while the row
     is still resumable; an outage leaves 'deleting'; the retry completes.

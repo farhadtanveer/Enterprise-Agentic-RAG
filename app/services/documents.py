@@ -123,7 +123,20 @@ def complete_delete(db: DBSession, doc_id: UUID, *, actor_user_id=None) -> None:
         )
         db.flush()
         if doc.storage_path:
-            shutil.rmtree(storage.parent, ignore_errors=True)
+            # Defense-in-depth (2026-11-05 incident): storage.parent must be
+            # a real uploads/<doc_id>/ directory. A malformed storage_path
+            # (e.g. a bare relative name whose parent resolves to "." — the
+            # process CWD) must never be rmtree'd: skip with an error and
+            # let the DB row delete proceed.
+            allowed_root = Path(get_settings().upload_dir).resolve()
+            target = storage.parent.resolve()
+            if target == allowed_root or allowed_root not in target.parents:
+                logger.error(
+                    "complete_delete refusing to rmtree %s — not under upload_dir %s",
+                    target, allowed_root,
+                )
+            else:
+                shutil.rmtree(target, ignore_errors=True)
 
 
 def list_stuck_deletes(db: DBSession) -> list[Document]:
