@@ -10,7 +10,7 @@ import time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy.orm.exc import StaleDataError
@@ -24,6 +24,7 @@ from app.services import conversations as conv_service
 from app.services.audit_events import record_event
 from app.services.ratelimit import SlidingWindowLimiter
 from app.services.retrieval import retrieval_filter_for
+from app.services.validation import title_problems
 
 router = APIRouter(prefix="/api", tags=["conversations"])
 settings = get_settings()
@@ -37,9 +38,27 @@ SEND_ROUTE = "/api/conversations/{id}/messages"
 class CreateConversationRequest(BaseModel):
     title: str | None = Field(default=None, max_length=200)
 
+    @field_validator("title")
+    @classmethod
+    def _title_hygiene(cls, v: str | None) -> str | None:
+        # F3 (review finding 3): titles reject NUL/control characters —
+        # pydantic maps the ValueError to 422
+        problems = title_problems(v)
+        if problems:
+            raise ValueError("; ".join(problems))
+        return v
+
 
 class RenameConversationRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
+
+    @field_validator("title")
+    @classmethod
+    def _title_hygiene(cls, v: str) -> str:
+        problems = title_problems(v)
+        if problems:
+            raise ValueError("; ".join(problems))
+        return v
 
 
 class SendMessageRequest(BaseModel):

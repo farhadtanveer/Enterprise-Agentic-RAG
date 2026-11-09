@@ -108,8 +108,15 @@ def _ingest_one(db, *, path: Path, scope: str, owner_id, source_label: str) -> s
     from app.rag.vectorstore import add_documents
     from app.services import documents as docs_service
     from app.services.ingestion import chunk_documents, load_file
+    from app.services.validation import display_name_problems
 
     display_name = path.name
+    problems = display_name_problems(display_name)
+    if problems:
+        # F3: the same hygiene rules apply to operator-supplied names
+        raise click.ClickException(
+            f"invalid filename {display_name!r}: " + "; ".join(problems)
+        )
     doc = docs_service.create_document(
         db, scope=scope, owner_id=owner_id, display_name=display_name,
         storage_path="", checksum="", size_bytes=0,

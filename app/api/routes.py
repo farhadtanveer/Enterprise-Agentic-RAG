@@ -14,6 +14,7 @@ from app.services.audit import write_audit
 from app.services.audit_events import record_event
 from app.services.ratelimit import SlidingWindowLimiter
 from app.services.retrieval import ORG_ONLY_FILTER
+from app.services.validation import display_name_problems
 
 router = APIRouter(prefix="/api")
 settings = get_settings()
@@ -88,6 +89,13 @@ async def ingest(
     ):
         raise HTTPException(status_code=401, detail="Invalid admin key")
     display_name = Path(file.filename or "").name
+    # F3 (review finding 3): the client-controlled filename is validated —
+    # NUL/control characters (a raw NUL used to crash the DB driver as an
+    # unhandled 500), Windows reserved device names, reserved filesystem
+    # characters, trailing dot/space, over-length — before any row or file.
+    name_problems = display_name_problems(display_name)
+    if name_problems:
+        raise HTTPException(status_code=422, detail="; ".join(name_problems))
     suffix = Path(display_name).suffix.lower()
     if suffix not in SUPPORTED:
         raise HTTPException(status_code=400, detail=f"Supported: {', '.join(sorted(SUPPORTED))}")
