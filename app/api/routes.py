@@ -156,9 +156,30 @@ async def ingest(
     doc.size_bytes = size
     doc.checksum = checksum
     db.flush()
+    # S2: content (parse) failures and infrastructure failures answer
+    # DIFFERENT codes. The parser stage is driven entirely by the uploaded
+    # bytes — a corrupt/unparseable file is the CLIENT's error (422,
+    # generic message). Everything downstream (the vector store) is
+    # infrastructure — still the handled 500. Both keep the row marked
+    # 'failed' and log the exception CLASS only (F4).
     try:
         loaded = load_file(dest)
         chunks = chunk_documents(loaded)
+    except Exception as exc:
+        documents_service.mark_failed(db, doc, "unparseable")
+        record_event(
+            db, "document_uploaded", object_type="document", object_id=doc.id,
+            outcome="error", route="/api/ingest",
+            details={"scope": "org", "via": "legacy_ingest", "error_class": "unparseable"},
+        )
+        db.commit()
+        # parser errors can embed file content (e.g. XML fragments from a
+        # malformed docx) — log the class only, never the body (F4)
+        logger.error("legacy ingest failed: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=422, detail="File could not be parsed"
+        ) from None
+    try:
         ids = add_documents(
             chunks, doc_id=doc.id, scope="org", owner_id=None, source_name=display_name
         )
@@ -170,9 +191,6 @@ async def ingest(
             details={"scope": "org", "via": "legacy_ingest", "error_class": "ingest_failed"},
         )
         db.commit()
-        # F4: same rule as the chat path — parser errors can embed file
-        # content (e.g. XML fragments from a malformed docx); log the class
-        # only, never the exception body.
         logger.error("legacy ingest failed: %s", type(exc).__name__)
         raise HTTPException(status_code=500, detail="Ingest failed") from None
 

@@ -82,14 +82,41 @@ def test_streaming_cap_no_row_no_partial_file(db_session, tmp_path, monkeypatch)
         assert not any(p.is_file() for p in uploads.rglob("*")) if uploads.exists() else True
 
 
-def test_bogus_docx_is_a_handled_failure_not_a_crash(db_session, tmp_path, monkeypatch):
-    """Pin (correct today): a .docx that is not a zip (python-docx raises
-    BadZipFile-ish) must end in the handled ingest-failure path — 500 with
-    a generic body, document row status='failed', error class only."""
+def test_bogus_docx_is_a_client_error_not_a_server_error(
+    db_session, tmp_path, monkeypatch
+):
+    """S2 (mandate): a corrupt/unparseable upload is a CLIENT error —
+    422 with a generic body, never a 500. The document row is still marked
+    'failed' (evidence), the error class only. (Changed from the original
+    500 pin by explicit instruction.)"""
     with ingest_client(db_session, tmp_path, monkeypatch) as (client, uploads):
         r = post_file(client, "evil.docx", b"PK\x03\x04 garbage not a real zip")
-        assert r.status_code == 500
+        assert r.status_code == 422, r.text
         assert "BadZip" not in r.text and "exception" not in r.text.lower()
+
+
+def test_garbage_body_pdf_is_422_generic(db_session, tmp_path, monkeypatch):
+    """S2: a file whose magic passes the F6 gate but whose body the parser
+    rejects (truncated PDF) is also 422 with a generic message."""
+    with ingest_client(db_session, tmp_path, monkeypatch) as (client, uploads):
+        r = post_file(client, "truncated.pdf", b"%PDF-1.7\nno real xref table here")
+        assert r.status_code == 422, r.text
+        assert "pypdf" not in r.text.lower() and "error" not in r.text.lower()
+
+
+def test_infrastructure_failure_is_still_500(db_session, tmp_path, monkeypatch):
+    """S2 boundary: the 422 contract covers CONTENT (parse) failures only.
+    An infrastructure failure downstream of parsing (here: the vector store
+    raises) must still surface as the handled 500 — mapping it to 422 would
+    tell the client their file is bad when it isn't."""
+    with ingest_client(db_session, tmp_path, monkeypatch) as (client, uploads):
+        with patch("app.api.routes.load_file", return_value=[]), \
+             patch("app.api.routes.chunk_documents", return_value=[]), \
+             patch("app.api.routes.add_documents",
+                   side_effect=RuntimeError("pinecone outage simulated")):
+            r = post_file(client, "fine.txt", b"perfectly good text")
+            assert r.status_code == 500, r.text
+            assert "outage" not in r.text.lower()
 
 
 def test_oversized_docx_decompression_is_bounded_by_upload_cap(
