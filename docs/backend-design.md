@@ -684,10 +684,11 @@ Rules:
 | PATCH | `/api/admin/users/{id}` | ✓ | admin | Change role, disable/enable, display name. **409** if the change would leave zero active admins (last-admin guard, incl. self) | 401, 403, 409, 422 |
 | DELETE | `/api/admin/users/{id}` | ✓ | admin | Delete user: cascades conversations/messages/sessions/private docs+vectors (consistency rules §A9.1). **409** last-admin guard. Double-confirm via request body flag | 401, 403, 404, 409 |
 | POST | `/api/admin/users/{id}/reset-password` | ✓ | admin | New temp password, revoke sessions | 401, 403 |
-| GET | `/api/admin/documents` | ✓ | admin | All documents incl. private: meta + ingest status (name/size/status/owner — **content never**) | 401, 403 |
+| GET | `/api/admin/documents` | ✓ | admin | **Org documents per-document (meta only) + private aggregates (k≥5) + users over/near quota — NO per-document private rows, NO private filenames (C4, DECISION #1)** | 401, 403 |
 | POST | `/api/admin/documents` | ✓ | admin | Upload org document | 401, 403, 422 |
-| PATCH | `/api/admin/documents/{id}` | ✓ | admin | Set visibility — org docs only (**D11**) | 401, 403, 404 |
-| DELETE | `/api/admin/documents/{id}` | ✓ | admin | Delete any document + vectors (no content exposure) | 401, 403, 404 |
+| PATCH | `/api/admin/documents/{id}` | ✓ | admin | Update **org** document meta only — never group documents (**C3**, D11) | 401, 403, 404 |
+| DELETE | `/api/admin/documents/{id}` | ✓ | admin | Delete ANY document (org, group, or private — **C3**, audited, no content access) | 401, 403, 404 |
+| POST | `/api/admin/users/{id}/purge-private-documents` | ✓ | admin | **C4 bulk delete: all private documents of user X** (+vectors, §A9.1, audited); org/group docs of X survive (C2) | 401, 403, 404 |
 | GET | `/api/admin/metrics` | ✓ | admin | **Deferred (§A12)** — when built: aggregate only, buckets < 5 users suppressed (**D3**); no per-user series | 401, 403 |
 | GET | `/api/health` | none | — | Liveness (unchanged, `routes.py:23-25`) | — |
 
@@ -914,11 +915,13 @@ server, then `delete_all` in the test namespace. CI never sets the env var.
 ## A12. Phase B preview (amended order and scope)
 
 One step = one commit, tests first, authorization tests per step, no
-destructive actions. **STOP for your review after B2 and after B4** (unchanged).
-Per your revision: after B6 the phase skips to the transitional UI; **admin
-aggregate metrics, the retention sweep, data export, and the feedback
-endpoint are deferred** until you ask for them (their design stays in
-§A6/§A8/§A9 so nothing has to be re-decided later).
+destructive actions. **STOP for your review after B2 and after B4** (done,
+2026-11-05), and — per correction **C7** — **after G1 and after G2**.
+Order from C7: **B5 → B6 → G1 → G2 → B8 → B9.** The groups phase (G1/G2,
+§A14) is fully specified in §A14. **Admin aggregate metrics, the retention
+sweep, data export, and the feedback endpoint are deferred** until you ask
+for them (their design stays in §A6/§A8/§A9 so nothing has to be
+re-decided later).
 
 | Step | Commits (in order) | Key risks |
 |---|---|---|
@@ -926,8 +929,10 @@ endpoint are deferred** until you ask for them (their design stays in
 | **B2** | 5. users+sessions tables/migrations (uuidv7 defaults, CHECKs) · 6. argon2id + `bootstrap-admin` CLI · 7. login/logout/me + CSRF · 8. (username, IP) exponential throttle + login rate limit · 9. recovery CLIs (`reset-password`, `unlock`) · 10. auth dependency (session lookup, disabled-user check) + last-admin guard helpers — **CHECKPOINT: your review** | Cookie flags in prod TLS termination (`COOKIE_SECURE` behind proxy); throttle UX |
 | **B3** | 11. conversations+messages tables/migrations · 12. CRUD + ownership (404) tests · 13. chat integration with **TX1 → graph (no DB held) → TX2** discipline (§A8 lifecycle), filter via state, token capture, `status='error'` path · 14. per-user chat rate limit | Connection-discipline regressions (pinned by pool test); threading filter through graph state |
 | **B4** | 15. documents table/migration (org ⇒ `owner_id NULL` CHECK) + upload path with `MAX_UPLOAD_MB` (413) · 16. new chunk IDs + delete-by-`doc_id` · 17. server-side retrieval filter (incl. **org-only for legacy chat**) + ACL tests · 18. legacy-vector migration: new namespace, re-ingest scripts (sample KB → org docs, your upload → private to you per **D15**) · 19. deletion consistency per §A9.1 — **CHECKPOINT: your review** | Pinecone filter behavior (mitigated by live test); re-ingest coordination with you; the org-only filter changing legacy answers if re-ingest lapses |
-| **B5** | 20. audit_events table + writer · 21. legacy chat stops writing question/trace text; legacy ingest audits metadata-only · 22. `query_audit` drop script (runs only on your explicit confirmation — **D2**) · 23. log-content test + Tavily-error-log scrub | The one destructive step (guarded, explicit, verifiable row count) |
-| **B6** | 24. admin users endpoints (create/disable/role/reset-password/delete + last-admin 409s) · 25. admin documents endpoints (list/upload/delete; no visibility promote for private docs — **D11**) · 26. forced-password-change gate · 27. account self-delete (`DELETE /api/me`) with §A9.1 consistency | Cascade correctness; vector cleanup ordering |
+| **B5** | 20. audit_events table + writer (landed with B3/B4) · 21. **C8: the legacy audit writer is REMOVED** — `app/services/audit.py` + `write_audit` + `init_db` + `AUDIT_DB_PATH` deleted, so nothing creates `data/audit.db` (no `query_audit` drop script — obsolete, D2 amended: the file was lost in the 2026-11-05 incident); legacy chat/ingest write no question/trace text anywhere · 22. log-content test (DB-error marker absent from logs) | Any code still importing the writer (grep-guarded by a test) |
+| **B6** | 23. admin users endpoints (create with temp password / disable-enable / role change / reset-password / delete + last-admin 409 on EVERY path incl. self) · 24. `DELETE /api/me` with §A9.1 consistency · 25. admin documents: metadata-only ORG listing (C4: no private rows/filenames), org upload, delete ANY document (**C3**), bulk purge of one user's private documents (**C4**) · 26. forced-password-change gate covers every new route (route-inventory test) · 27. authz tests: user 403 / anonymous 401 / admin cannot read any chat; audit event per admin action (no content) | Cascade correctness; last-admin guard completeness |
+| **G1** | groups + memberships (M1), AccessResolver + strict tokens, scope CHECKs (M2 core), admin group/membership endpoints — **CHECKPOINT: your review (C7)** | Filter grammar change; resolver seams |
+| **G2** | document user-facing endpoints, quotas + global ingest concurrency, parser subprocess (DECISION #8), share-COPY (M3), versions (C6), citations v1 (C5) — **CHECKPOINT: your review (C7)** | Parser isolation; share-copy chunking |
 | **B8** | 28. minimal login page + logout in the current UI; sidebar key fields removed · 29. new-UI contract docs (`docs/api.md` from the §A8 tables) + deprecation notes in README/`.env.example` | Old UI breaking mid-rollout |
 | **B9** | 30. **Removal commit**: legacy `/api/chat` + `/api/ingest`, static-key settings, `localStorage` key handling gone; stale `README.md:159` fixed · 31. docs sweep | Someone still on legacy keys — the removal commit is deliberately last and separate |
 
@@ -938,8 +943,8 @@ lands with B3's messages migration to avoid a later table reorder, but no
 endpoint).
 
 Largest overall risks: (1) the B4 live-Pinecone behaviors — fenced behind the
-test namespace and a checkpoint; (2) B5's destructive step — guarded by
-explicit confirmation and a verified row count; (3) session cookie flags
+test namespace and a checkpoint; (2) ~~B5's destructive step~~ — **obsolete
+(C8): B5 removes code and no longer drops any table**; (3) session cookie flags
 behind TLS termination — verified in staging before go-live; (4) the B4
 org-only filter making legacy answers empty if the re-ingest is skipped —
 the checkpoint exists precisely so this can't happen silently.
@@ -979,7 +984,7 @@ UI renderer, the Tavily error-dict handling (M1), the CI pip-audit job.
 | # | Decision | Outcome |
 |---|---|---|
 | **D1** | Adopt PostgreSQL (compose for dev **and tests**) | **Accepted.** |
-| **D2** | Fate of existing `query_audit` rows | **Amended by Farhad:** no CSV export — the 8 rows are his own test questions. Drop table + delete `data/audit.db` in B5, script gated on his explicit confirmation at run time. |
+| **D2** | Fate of existing `query_audit` rows | **Amended by Farhad:** no CSV export — the 8 rows are his own test questions. **Obsolete per C8 (2026-11-09):** `data/audit.db` was lost in the 2026-11-05 incident, so no drop script runs — B5 REMOVES the legacy audit writer (`write_audit`, `init_db`, `AUDIT_DB_PATH`) instead. If a `data/audit.db` is ever found, it is preserved and reported, never deleted by code. |
 | **D3** | Per-user question counts for admins | **Accepted + tightened:** never exposed; every aggregate bucket also suppressed below **5 users** (k-anonymity floor). Metrics endpoint deferred. |
 | **D4** | Who may upload | **Accepted:** admin-only org uploads in Phase B; user private uploads later opt-in. **Amended by §A14:** the group phase ships quota'd personal uploads for all users + group uploads for `group_editor`s. |
 | **D5** | Conversation retention default | **Accepted:** none by default; Farhad chooses the real period before go-live (sweep deferred until then). |
@@ -1052,15 +1057,18 @@ it cannot bind whoever has database or vendor access (§A2).
 
 ---
 
-## A14. Amendment — the department/group model (decided by Farhad, 2026-11-09)
+## A14. Amendment — the department/group model (decided 2026-11-09; outcomes
+## and corrections C1–C8 applied 2026-11-09)
 
 This section amends §A4 (data model), §A7 (scopes/ACL), §A8 (API contract)
 and the D-decision table (§A13) for three document audiences and group
-sharing. **Documents only — no code in this amendment.** Where a rule here
-conflicts with earlier text, **§A14 wins**. Phase A privacy rules are
-reaffirmed, not weakened: **nobody reads another user's chats** — not a
-group_editor, not an admin, not with any new role (§A8 "must not exist"
-list still holds).
+sharing. **Documents only — no code yet.** Where a rule here conflicts with
+earlier text, **§A14 wins**. Phase A privacy rules are reaffirmed, not
+weakened: **nobody reads another user's chats** — not an editor, not an
+admin, not with any new surface (§A8 "must not exist" list still holds).
+The ten DECISIONS at the end (§A14.11) are now CLOSED with outcomes
+(recorder's note: this v2 folds in Farhad's correction list C1–C8, which
+take precedence over the v1 text wherever they differ).
 
 ### A14.1 Audiences and the read_access token scheme
 
@@ -1073,39 +1081,48 @@ that may match it:
 | group | `"group:<group_id>"` | members of that group |
 | private | `"user:<user_id>"` | the owner only |
 
-- A document's audience set is: org docs → `["org"]`; private docs →
-  `["user:<owner>"]` (plus `"group:<id>"` tokens only if a share was
-  approved — see A14.5); group docs → `["group:<group_id>"]`.
-- **Backward compatibility with B4 vectors:** B4 wrote the bare owner UUID
-  (`["<owner_id>"]`) for private docs. The group phase migrates to the
-  prefixed form — plan in A14.4 (migration M3).
+- A document's audience set: org docs → `["org"]`; private docs →
+  `["user:<owner>"]`; group docs → `["group:<group_id>"]`.
+- **DECISION #9 (vector token migration):** before building any migration,
+  inspect the **rag-v2 namespace** for vectors whose `read_access` holds a
+  bare UUID (B4 wrote bare owner UUIDs for private docs). **If none exist:
+  no migration at all** — drop the retag CLI idea AND the bare-UUID
+  transition acceptance in the resolver (the strict prefixed form is the
+  only accepted token from day one). **If bare-UUID vectors exist: delete
+  and re-ingest** those documents (the §A9.1-consistent path; per-vector
+  metadata updates stay out of scope).
 - Groups are the generalization of "department": `groups.kind` starts as
   `'department'`, with `'project_team'` reserved in the CHECK so team
-  workspaces need a value change, not a migration. Nothing else in the
-  model is department-specific.
+  workspaces need a value change, not a migration.
 
-### A14.2 Roles
+### A14.2 Roles (CORRECTED by C1 — no `group_editor` role)
 
-| Role | May | May NOT |
+**C1: editor-ness lives on the MEMBERSHIP, not the user.** `users.role`
+stays `IN ('user','admin')` forever; `group_memberships.role` is
+`'member' | 'editor'`.
+
+| Role / status | May | May NOT |
 |---|---|---|
-| `user` | chat; upload **private** docs within personal quotas (A14.6); read org docs | upload to groups or org; manage anything shared |
-| `group_editor` | everything a user may, **plus** upload/update/delete documents of **their own groups** (within group quotas); approve/deny share requests targeting their groups | read anyone's chats or private documents; manage users; touch other groups' documents (404, per the §A8 rule) |
-| `admin` | everything a group_editor may for **org** documents; manage users (B6 surface, last-admin guard); create/delete groups and manage memberships; see metadata-only admin listings | read anyone's chats; read private document **content**; retrieve a group document of a group they are **not** a member of — no implicit group access (admins who need one join it explicitly via the audited membership surface, and D16 still applies: org docs stay ownerless) |
+| `user` (role) | chat; upload **private** docs within personal quotas (A14.6); read org docs; retrieve docs of groups they are a member of | upload to org; manage anything shared; anything admin |
+| membership `editor` in group G | upload/update/delete **documents of G** (quota'd); approve/deny share requests targeting G | read anyone's chats or private documents; touch other groups' documents (404); manage users |
+| `admin` (role) | manage users (create/disable/role/reset/delete, last-admin guard); create/delete groups, manage memberships (C5); upload/update/delete **org** documents; delete ANY document (C3, audited, never content); metadata-only admin listings (C4) | read anyone's chats; read private document content; **update** group documents (C3); retrieve a group document of a group they are not a member of — no implicit access (DECISION #4) |
 
-- This **amends D4**: regular users DO get personal uploads in the group
-  phase (quota'd and rate-limited, A14.6), not "admin-only until further
-  notice". The B4 shipped state (admin-only org uploads) is the interim.
-- The `users.role` CHECK gains `'group_editor'` (A14.4 migration M1). Roles
-  stay mutually exclusive — a group_editor is not a partial admin, it is a
-  user with document powers inside named groups.
+- DECISION #4: an admin who needs retrieval from group G **self-joins** via
+  the audited membership surface (`membership_added` audit event, and the
+  membership list of G is visible to G's editors — a join by admin shows up
+  where the group's editors can see it).
+- DECISION #5: membership management is admin-only (editors manage
+  documents, not people).
+- The `last-admin guard` logic is unchanged (it counts `users.role='admin'`
+  AND active; membership editors are irrelevant to it).
 
 ### A14.3 Memberships and the AccessResolver
 
-- Users belong to any number of groups via `group_memberships` (M:N).
+- Users belong to any number of groups via `group_memberships` (M:N, each
+  with `role 'member'|'editor'` per C1).
 - **A user's audience list is computed from memberships on EVERY request** —
-  never cached on the session row, never snapshotted at login. A membership
-  grant or revoke applies to the user's very next retrieval; no "logout to
-  apply" semantics, no stale-filter window.
+  never cached on the session row, never snapshotted at login. A grant or
+  revoke applies to the user's very next retrieval; no stale-filter window.
 - The filter builder moves behind one interface so the same rules run
   against Pinecone now and pgvector later:
 
@@ -1117,21 +1134,23 @@ class AccessResolver(Protocol):
 
     def filter_for(self, user: User) -> dict:
         """{"read_access": {"$in": audiences_for(user)}} — the SAME single
-        $in condition as today (array-any-match semantics); the Pinecone
-        implementation is a direct lift of retrieval_filter_for."""
+        $in condition as today (array-any-match semantics)."""
 
     def can_read(self, user: User, doc: Document) -> bool:
         """Listing/detail checks in Postgres terms (scope, group_id,
-        owner_id, approved shares) — mirrors what the vector filter would
-        match, so listings and retrieval can never disagree."""
+        owner_id) — mirrors what the vector filter would match, so listings
+        and retrieval can never disagree."""
+
+    def is_editor(self, user: User, group_id) -> bool:
+        """True iff the user's membership in THIS group has role='editor'
+        (C1 — editor-ness is per-group, off the membership row)."""
 ```
 
 - Fail-closed carries over unchanged: a vector with no `read_access` key
   matches nothing; `get_retriever` still refuses a missing filter; the
   legacy chat keeps the static `ORG_ONLY_FILTER`.
-- The resolver is the only place that knows about tokens. Call sites
-  (`send_message` TX1, listings, share checks) ask the resolver; they never
-  build `read_access` arrays themselves.
+- With DECISION #9 applied, the resolver accepts ONLY the prefixed token
+  forms (`org`, `group:<id>`, `user:<id>`).
 
 ### A14.4 Data model changes and the Alembic plan (from the B4 schema)
 
@@ -1152,6 +1171,7 @@ erDiagram
         uuid id PK
         text name UK "unique among active groups"
         group_kind kind "department | project_team (extensible CHECK)"
+        int review_days "NULL = ORG default 180 (DECISION #6)"
         text contact "nullable; shown on insufficient answers"
         boolean is_active "false = archived, memberships kept"
         timestamptz created_at
@@ -1160,268 +1180,320 @@ erDiagram
     group_memberships {
         uuid group_id FK "ON DELETE CASCADE"
         uuid user_id FK "ON DELETE CASCADE"
+        member_role role "'member' | 'editor' (C1)"
         timestamptz added_at
     }
 ```
 
-- `groups.name` unique; `kind` CHECK `IN ('department','project_team')`
-  (department is all v1 creates); `contact` is a free-text pointer (mail
-  alias/room/None — see DECISIONS #10) surfaced when a chat ends with
-  **insufficient evidence** so the user knows where to ask next.
-- `group_memberships`: composite PK/unique `(group_id, user_id)`; both FKs
-  `ON DELETE CASCADE` (deleting a group or user cleans up instantly; the
-  documents themselves are NOT deleted with the group — see M2's RESTRICT).
-- `users.role` CHECK extended to `IN ('user','group_editor','admin')`
-  (drop + re-add the CHECK in one transaction).
+- `groups.name` unique; `kind` CHECK `IN ('department','project_team')`;
+  `review_days` NULLable per-group override of the global
+  `GROUP_DOC_REVIEW_DAYS` (**DECISION #6: global default 180**); `contact`
+  is nullable free text (an alias/room, not a user FK).
+- `group_memberships`: unique `(group_id, user_id)`; both FKs
+  `ON DELETE CASCADE`; **`role` CHECK `IN ('member','editor')` (C1)**;
+  `added_at` for the audit trail surface. **`users.role` is NOT touched**
+  (C1) — no migration of the users table at all.
+- **INSUFFICIENT-EVIDENCE CONTACTS (DECISION #10):** when a chat ends in
+  the `insufficient` terminal state, the payload carries the contacts of
+  the groups the user belongs to; users with **no groups get the
+  `ORG_CONTACT` setting** as fallback. An org-wide contact setting joins
+  the config (`ORG_CONTACT`, default empty).
 
-**M2 — `0006_document_groups`** (documents table changes)
+**M2 — `0006_document_groups`** (documents table changes; CORRECTED by C2)
 
 - `documents.scope` CHECK extends to `'org' | 'group' | 'private'`; new
   nullable `group_id FK groups ON DELETE RESTRICT` with CHECKs:
   `scope='group' ⇒ group_id NOT NULL`; `scope IN ('org','private') ⇒
   group_id IS NULL`. RESTRICT (not CASCADE): deleting a group with
-  documents must be an explicit re-homing decision, never a silent purge —
-  an archived group's docs stay retrievable by their historical audience
-  until an admin moves or deletes them.
-- Ownership CHECKs become: `scope='org' ⇒ owner_id IS NULL` (D16 kept);
-  `scope='private' ⇒ owner_id NOT NULL`; `scope='group' ⇒ owner_id NOT
-  NULL AND group_id NOT NULL` (the uploader is recorded for governance —
-  group_editors may still manage the doc, but "owner" stays attributable).
-- Governance fields on `documents`: `last_reviewed_at timestamptz NULL`,
-  `review_due_at timestamptz NULL`. Defaults set at ingest: for org and
-  group docs `review_due_at = now() + GROUP_DOC_REVIEW_DAYS` (DECISIONS
-  #6); `last_reviewed_at` is set by an explicit review action (PATCH), not
-  by edits. Answers cite **document name + section + last-updated date**
-  (chunk metadata gains `doc_updated_at` at ingest time = the document's
-  updated timestamp; section from the chunk's `start_index` heading — the
-  citation payload extends, it does not replace the current title/url/type
-  shape).
+  documents must be an explicit re-homing decision, never a silent purge.
+- **Ownership CHECKs (C2): org AND group documents are OWNERLESS** —
+  `scope='org' ⇒ owner_id IS NULL`; `scope='group' ⇒ owner_id IS NULL AND
+  group_id NOT NULL`; `scope='private' ⇒ owner_id NOT NULL AND group_id IS
+  NULL`. **New column `uploaded_by`** (nullable FK users,
+  `ON DELETE SET NULL`) records WHO put the document in, for every scope —
+  attribution without ownership: deleting a user never deletes group or org
+  documents (their `uploaded_by` just goes NULL), and **deleting a user
+  deletes ONLY their private documents** (their group/org docs stay).
+- Governance fields: `last_reviewed_at timestamptz NULL`,
+  `review_due_at timestamptz NULL`. At ingest, org and group docs get
+  `review_due_at = now() + (group.review_days OR GROUP_DOC_REVIEW_DAYS=180)`
+  (DECISION #6); `last_reviewed_at` is set by an explicit review action
+  (PATCH), not by edits. **Overdue marker in answers (DECISION #6):** when
+  a retrieved document's `review_due_at` is past, TX2 flags the citation
+  `{stale: true, review_due_at}` so the UI can render "this document is
+  overdue for review".
+- **Citations (C5):** v1 = **document name + PDF page + last-updated date**.
+  Section-level citations are DEFERRED until heading-aware chunking exists.
+  **Review/updated dates are read from Postgres in TX2 by `doc_id` — never
+  frozen into vector metadata** (one short query joining the cited
+  doc_ids; vector metadata carries only `doc_id`/`read_access`/`source`/
+  `page`).
 
-**M3 — `0007_document_shares` + vector re-tagging**
+**M3 — `0007_share_requests`** (vector token migration folded into DECISION
+#9: check rag-v2 for bare UUIDs first; none → no migration; some → delete
++ re-ingest those docs; in both cases the resolver's token grammar is
+strict from day one.)
 
 - `share_requests`: `id PK`, `document_id FK documents ON DELETE CASCADE`,
   `group_id FK groups ON DELETE CASCADE`, `requested_by FK users ON DELETE
-  CASCADE`, `status share_status 'pending' | 'approved' | 'denied'`,
-  `decided_by FK users NULL`, `decided_at timestamptz NULL`, `created_at`;
-  unique partial index: at most one **pending** request per
+  CASCADE`, `consent_text text NOT NULL` (the exact wording the user
+  accepted — DECISION #2), `status share_status 'pending' | 'approved' |
+  'denied'`, `decided_by FK users NULL`, `decided_at timestamptz NULL`,
+  `created_at`; unique partial index: at most one **pending** request per
   `(document_id, group_id)`.
-- Vector token migration (Pinecone side, operator CLI — the Postgres
-  migration only covers rows): for each document, recompute chunk ids from
-  the stored file (the B4-verified `_chunk_id` path) and `update_metadata`
-  each vector: `read_access` bare `"<uuid>"` → `"user:<uuid>"`. Dry-run
-  first, verified by the same recompute-and-intersect check b4.sh uses;
-  the resolver ALSO accepts the bare form during one transition release
-  (belt and braces), so a missed vector fails visible, not silently-open.
-  (DECISIONS #9 covers the alternative full re-ingest.)
 
-### A14.5 Sharing flow (D11 survives, scoped tighter)
+### A14.5 Sharing = COPY (DECISION #2), no audience moves (DECISION #3)
 
-1. Only the document **owner** can request: `POST /api/documents/{id}/share`
-   `{group_id}` — creates a `pending` share_request. Non-owners (including
-   admins and group_editors) get **404** on a document they cannot see; the
-   owner-only rule is therefore enforced by the same lookup, not a separate
-   403 surface.
-2. Approval is by a **group_editor of the TARGET group**:
-   `POST /api/shares/{id}/approve` (or `/deny`). On approval the document
-   **re-tags to the group**: `scope='group'`, `group_id=<target>`,
-   `read_access=["group:<id>"]` — the recommended v1 semantics (DECISIONS
-   #2). The original uploader remains `owner_id` for governance and keeps
-   update/delete rights alongside that group's editors.
-3. **An admin can never force-promote** — D11 is kept and extended: no
-   admin share approval, no admin path from private/org into a group
-   without the flow above. Org promotion stays forbidden outright.
-4. **Moving a document between audiences in Pinecone** — the audience is
-   vector metadata, so a scope/group change must reach every chunk.
-   Options, spelled out:
+1. Only the document **owner** can request:
+   `POST /api/documents/{id}/share` `{group_id, consent: true}` — the
+   request stores the **exact consent text** presented and accepted. Non-
+   owners (including admins) get **404** on a document they cannot see.
+2. Approval by an **editor of the TARGET group**:
+   `POST /api/shares/{id}/approve` (or `/deny`). On approval the system
+   **creates a NEW group document from the same stored bytes** — re-chunk
+   from `uploads/<private_doc_id>/…`, new `doc_id`, `scope='group'`,
+   `group_id=<target>`, `owner_id NULL`, `uploaded_by = requester`,
+   `read_access=["group:<id>"]`. **The private original stays untouched**
+   (same doc_id, same vectors, still `user:<owner>`-only). The two
+   documents are independent from then on (separate review dates, separate
+   deletion).
+3. **An admin can never force-approve** — no admin route exists on
+   `share_requests` at all (D11 kept: org promotion stays forbidden; a
+   group copy is not org promotion).
+4. **DECISION #3: no audience moves in v1.** A document never changes
+   scope/group after creation — no private→group conversion, no
+   group→group re-homing, no org→group. If a move is ever needed, it is
+   **delete + re-ingest** into the new audience (fresh doc_id), executed
+   by an admin; per-vector metadata updates and deterministic re-tagging
+   stay out of scope entirely.
 
-   | Option | Mechanism | Cost | Risk |
-   |---|---|---|---|
-   | (a) deterministic re-tag | recompute chunk ids from the stored file (`_chunk_id(doc_id, chunk)`), `index.update_metadata` per vector | N metadata calls, no re-embedding | breaks if the stored file drifted from the vectors (checksum guards catch it); per-call failure handling |
-   | (b) delete + re-ingest | `delete_document_vectors(doc_id)` then the normal ingest path re-embeds from `uploads/<doc_id>/…` | N embeddings (cost, latency) | reuses battle-tested paths only; idempotent; the §A9.1 vectors-first ordering applies unchanged |
-   | (c) manual delete + re-upload | owner deletes; uploads anew into the group | trivial code (zero) | worst UX; citations/history lose doc continuity |
+**C6 — Document content update (new version of the same document):**
+`PUT /api/documents/{id}/content` (owner for private; editors of the group
+for group; admin for org — same rights as update-meta but NOT admin-on-
+group per C3). Flow, §A9.1-consistent and audited (`document_updated`):
+same `doc_id` is kept; **add the new version's chunks FIRST, then delete
+the old ones** (the window where both exist is safe — retrieval matches
+the union briefly; the reverse order would blank the document mid-flight).
+The stored file is replaced, checksum/size/review fields updated,
+`last_reviewed_at` NOT touched (content != review). Old chunk ids are the
+deterministic `_chunk_id(doc_id, chunk)` set recomputed from the OLD
+stored bytes before replacement. Fail between the two phases leaves the
+sweep-resumable shape (old ids recorded in the audit `details`).
 
-   **Recommendation: (b) for v1** — implement the share/move as
-   delete-vectors + re-ingest from the stored file, inside the §A9.1
-   protocol; (a) is the later optimization once per-vector update failure
-   handling exists; (c) remains the manual fallback and is what v1's UI
-   copy tells the user if the automated re-ingest fails. (The v1 instinct
-   of "simply require delete + re-upload" is (c); this design picks (b) so
-   the user never has to re-upload by hand.)
-
-### A14.6 Personal uploads: quotas and limits (amends D4)
+### A14.6 Personal uploads: quotas and limits (amends D4; DECISIONS #7, #8)
 
 Regular users upload private documents subject to, in enforcement order:
 
-1. `USER_UPLOAD_MAX_MB` per file (≤ the global `MAX_UPLOAD_MB`; 413).
-2. `USER_UPLOAD_TOTAL_MB` per user across all their private docs (409).
-3. `USER_UPLOAD_MAX_DOCS` count per user (409).
-4. `USER_UPLOADS_PER_HOUR` per-user sliding window — the same
+1. `USER_UPLOAD_MAX_MB=25` per file (≤ the global `MAX_UPLOAD_MB`; 413).
+2. `USER_UPLOAD_TOTAL_MB=250` per user across all their private docs (409).
+3. `USER_UPLOAD_MAX_DOCS=50` per user (409).
+4. `USER_UPLOADS_PER_HOUR=10` per-user sliding window — the same
    `SlidingWindowLimiter` class as chat/login, keyed on user id (429 +
    `Retry-After`).
-5. Allowed types: the existing `SUPPORTED` set; the F6 content gate
+5. **DECISION #7 additions:** admins are **exempt from personal quotas**
+   (org uploads are their job); a **global ingest concurrency limit**
+   (`INGEST_CONCURRENCY`, small semaphore — e.g. 2) caps simultaneous
+   parse/embed runs so N parallel uploads cannot starve the process.
+6. Allowed types: the existing `SUPPORTED` set; the F6 content gate
    (magic bytes / UTF-8 / NUL) applies identically.
-6. **Background ingestion with visible status**: the upload request
-   persists the row and the file, ingestion completes in-request for v1;
-   `GET /api/documents/{id}` exposes `status: pending | indexed | failed`
-   (the B4 documents table already carries this), and the contract stays
-   identical if processing moves to a worker later (DECISIONS #8).
+7. **DECISION #8:** ingestion stays **in-request**, but the **parser runs
+   in a SUBPROCESS with a hard timeout and a memory limit** — an unbounded
+   or malicious file can kill the worker process, not the app (this also
+   closes review finding #4's parser-bound gap: the subprocess cap is the
+   bound; `422` with a generic message on parser failure/timeout — see
+   S2). The upload contract (status via `GET /api/documents/{id}`) is
+   unchanged.
 
-Admin visibility: the admin listing (`GET /api/admin/documents`, B6
-surface) gains per-user aggregates — total bytes, document count, quota
-headroom — computed with the **D3 k≥5 rule**: any aggregate bucket over
-private uploads is suppressed below 5 users. Admins see metadata only,
-never content — and whether they see **filenames** of private docs is
-DECISIONS #1 (the one explicitly-delegated choice; recommendation: hide
-filenames too, show size/count/status, since a filename like
-"salary bands.pdf" is itself a leak).
+**Admin visibility (DECISION #1 + C4):** the admin listing shows **org
+documents per-document** (meta only) and, for private documents, **NO
+per-document view at all** — no filenames (a filename like "salary
+bands.pdf" is itself a leak), no rows, not even existence. Admins get
+**system-wide aggregates** (total private bytes, doc count — each bucket
+suppressed below 5 users per D3) **plus a list of users over or NEAR
+quota** (the enforcement-relevant view) and the bulk-delete endpoint
+(C4/A14.7) for intervention.
 
-### A14.7 API contract additions (404 rule throughout)
+### A14.7 API contract additions (404 rule throughout; C3/C4 applied)
 
 All under the §A8 conventions (session + CSRF; **404, never 403, for
-resources outside your audience** — the existence of a group you are not
-in, its documents, and other people's private docs is not leaked).
-New/changed:
+resources outside your audience**). New/changed:
 
-| Method | Path | Auth | Roles | Summary | Errors |
+| Method | Path | Auth | Who | Summary | Errors |
 |---|---|---|---|---|---|
 | GET | `/api/documents` | ✓ | any | Meta list: org + own groups' + own private docs (status, size, review dates; no content) | 401 |
-| POST | `/api/documents` | ✓ | any* | Upload: default private (quota'd); `group_id` field for group_editors (own groups only); org upload stays admin-only (D4 as amended) | 401, 403, 404 (unknown group), 409 (quota count/bytes), 413, 415, 422, 429 |
+| POST | `/api/documents` | ✓ | any / editors / admin | Upload: default private (quota'd); `group_id` for **editors of that group**; org = admin only | 401, 403, 404 (unknown group), 409 (quota), 413, 415, 422, 429 |
 | GET | `/api/documents/{id}` | ✓ | audience | Status/meta of an org, own-group, or own private doc | 401, **404** |
-| PATCH | `/api/documents/{id}` | ✓ | owner / group_editor of that group / admin (org only) | Update meta: review dates (`last_reviewed_at`), display_name — **never scope/group** (moves go through the share flow / admin re-home) | 401, 403, 404, 422 |
-| DELETE | `/api/documents/{id}` | ✓ | owner / group_editor of that group / admin (org or any per B6) | Delete + vectors per §A9.1 | 401, 404 |
-| POST | `/api/documents/{id}/share` | ✓ | **owner only** | `{group_id}` → pending share request | 401, 404, 409 (already pending/approved), 422 |
-| GET | `/api/shares` | ✓ | group_editor | Pending requests for **their** groups | 401 |
-| POST | `/api/shares/{id}/approve` / `deny` | ✓ | group_editor of the target group | Decides the request; approve → re-tag + delete/re-ingest (A14.5); **admin has no such route** | 401, 403, 404 |
-| GET/POST/PATCH/DELETE | `/api/admin/groups…` | ✓ | admin | Group CRUD + membership add/remove (`/api/admin/groups/{id}/members`); every change audited (`group_created`, `membership_added`, …) | 401, 403, 404, 409, 422 |
+| PATCH | `/api/documents/{id}` | ✓ | owner (private) / **editors of that group** / admin (**org only**) | Update meta: review dates (`last_reviewed_at`), display_name — never scope/group (no moves, DECISION #3) | 401, 403, 404, 422 |
+| PUT | `/api/documents/{id}/content` | ✓ | owner (private) / editors of that group / admin (org only — **C3: never group**) | New version: same doc_id, chunks added first then old deleted (C6) | 401, 403, 404, 413, 415, 422 |
+| DELETE | `/api/documents/{id}` | ✓ | owner (private) / editors of that group / **admin: ANY document (C3 — audited, no content access)** | Delete + vectors per §A9.1 | 401, 404 |
+| POST | `/api/documents/{id}/share` | ✓ | **owner only** | `{group_id, consent:true}` → pending request; consent text stored (DECISION #2) | 401, 404, 409 (already pending), 422 |
+| GET | `/api/shares` | ✓ | editors | Pending requests for **their** groups | 401 |
+| POST | `/api/shares/{id}/approve` / `deny` | ✓ | **editor of the target group only** | Approve → **COPY** to a new group doc (DECISION #2); admin has NO route here | 401, 403, 404 |
+| GET/POST/PATCH/DELETE | `/api/admin/groups…` | ✓ | admin | Group CRUD + membership add/remove (with `role member|editor`); **admin self-join audited and visible to the group's editors** (DECISION #4); every change audited | 401, 403, 404, 409, 422 |
+| GET | `/api/admin/documents` | ✓ | admin | **Org documents per-document (meta only) + private aggregates (k≥5) + users over/near quota (C4)** — no per-document private rows, no private filenames (DECISION #1) | 401, 403 |
+| POST | `/api/admin/documents` | ✓ | admin | Upload org document | 401, 403, 422 |
+| DELETE | `/api/admin/documents/{id}` | ✓ | admin | Delete ANY document — org, group, or private (C3; audited `document_deleted` with actor; never content) | 401, 403, 404 |
+| POST | `/api/admin/users/{id}/purge-private-documents` | ✓ | admin | **C4 bulk delete: all private documents of user X** (+ vectors, §A9.1; audited; the user keeps their chats and account) | 401, 403, 404 |
+
+**C3 consistency rule (A8 + A14.7 + matrix):** admin WRITE access is
+delete-only outside org documents. Admin PATCH on a group document →
+403/404 (wrong-role/absent per the audience rule — an admin who is not in
+the group sees 404; who is a member but not editor sees 403). Admin
+GET of a private/group document **content** does not exist.
 
 **Permission matrix** (R = retrievable/visible; 404 = indistinguishable
-from nonexistent):
+from nonexistent; E(G) = membership-editor of group G):
 
-| Action | user | group_editor | admin |
+| Action | user (member of G) | editor of G | admin |
 |---|---|---|---|
 | Retrieve org doc | R | R | R |
-| Retrieve doc of group G | R iff member of G | R iff member of G | R iff member of G (no implicit access) |
-| Retrieve private doc | R iff owner | R iff owner | R iff owner (**never** content via the admin surface) |
-| Upload private | ✓ (quota) | ✓ (quota) | ✓ (exempt? DECISIONS #7) |
-| Upload into group G | — | ✓ iff editor of G | — (org only) |
-| Update/delete group G doc | iff owner | ✓ iff editor of G | — |
-| Update/delete org doc | — | — | ✓ |
-| Request share | iff owner | iff owner | — (404 like anyone else) |
-| Approve share into G | — | ✓ iff editor of G | **no route** (D11) |
-| Manage groups/memberships | — | — | ✓ |
+| Retrieve doc of group G | R iff member of G | R | R iff member of G (no implicit access; self-join audited + visible to G's editors) |
+| Retrieve private doc | R iff owner | R iff owner | R iff owner (**never** content via admin APIs) |
+| See private doc in any admin listing | — | — | never (aggregates + near-quota users only) |
+| Upload private | ✓ (quota) | ✓ (quota) | ✓ (exempt, DECISION #7) |
+| Upload into group G | — | ✓ | — (org only) |
+| Update meta: group G doc | — | ✓ | **no** (C3) |
+| Update meta: org doc | — | — | ✓ |
+| New version (content): private | owner ✓ | — | — |
+| New version (content): group G doc | — | ✓ | **no** (C3) |
+| New version (content): org doc | — | — | ✓ |
+| Delete: private doc | owner ✓ | — | ✓ any (C3) |
+| Delete: group G doc | — | ✓ | ✓ any (C3) |
+| Delete: org doc | — | — | ✓ |
+| Request share | owner ✓ | owner ✓ | — (404 like anyone) |
+| Approve share into G | — | ✓ | **no route** (D11) |
+| Manage groups/memberships | — | — | ✓ (self-join audited, visible to G's editors) |
 | Read chats | own only | own only | own only |
 
 **Endpoints that must NOT exist** (extends the §A8 list): any share
-approval/deny route reachable by admin; any user-facing "list members of a
-group I'm not in" route; any route returning group documents to
-non-members outside the audience rule; any admin route that widens
-`read_access` without the share flow.
+approval route for admins; any admin per-document view/listing of private
+documents (C4); any admin UPDATE of group documents (C3); any "list
+members of a group I'm not in" user-facing route; any route returning
+group documents to non-members; any admin route that widens `read_access`
+without the share-copy flow.
 
 ### A14.8 Behavior tests (backend-agnostic — run unchanged against pgvector)
 
-Written against the AccessResolver/document-service seams with the existing
-fake-store pattern (`tests/security/`, offline). Pinecone specifics ($in
-array semantics, metadata filters) stay behind the interface, so the
-assertions survive a pgvector migration verbatim:
+Written against the AccessResolver/document-service seams with the fake
+store pattern (`tests/security/`, offline):
 
 1. **Audience computation** — memberships in 2 groups ⇒ `audiences_for ==
    ["org", "group:<g1>", "group:<g2>", "user:<self>"]`; revoking one
-   membership changes the NEXT request's filter (no cache): the same live
-   session's next chat cannot retrieve the group doc (fake store asserts
-   the captured filter AND the results).
+   membership changes the NEXT request's filter (no cache); a membership
+   `role` change member↔editor flips ONLY the editor powers, never the
+   audience (C1).
 2. **Group isolation through the full chat path** — A (member of G1) and B
    (member of G2 only): A never receives a G2 chunk or citation; the G1
-   doc DOES flow for A (positive control, so the isolation is not a rigged
-   fake).
+   doc DOES flow for A (positive control).
 3. **Admin has no implicit group access** — admin (member of nothing) asks
-   about a group doc → no chunk; admin joins G1 via the membership surface
-   → next request retrieves it; the join wrote `membership_added` audit.
-4. **Share flow** — non-owner POST share → 404; owner requests into G1 →
-   pending; G2's editor sees nothing in their queue; G1's editor approves →
-   doc retrievable by G1 members and the owner, no longer `private`; deny
-   leaves it private; admin approve attempt → 404 (route absent).
-5. **Re-tag mechanics** — the chosen A14.5 option's happy path: vectors
-   first, rows last (§A9.1), fake store asserts the delete-by-doc_id
-   filter and that re-ingest writes the NEW audience token; a simulated
-   re-ingest failure leaves `deleting` state, resumable by the sweep.
-6. **Quotas** — per-file cap 413; total-bytes and doc-count 409; hourly
-   window 429 with `Retry-After` while another user uploads fine; quota
-   enforcement is per-user server-side, so parallel requests cannot bypass.
-7. **Governance citations** — an answer from a group doc cites name +
-   section + last-updated date (fake store supplies `doc_updated_at`); the
-   insufficient-evidence terminal state carries the contacts of **the
-   user's own groups** and never another group's contact.
-8. **Role gates** — group_editor: chat reads stay owner-only; admin surface
-   unchanged; `users.role` CHECK rejects unknown roles; last-admin logic
-   ignores group_editors (they are not admins).
-9. **Delete consistency across the new shapes** — deleting a group doc
-   cascades its share_requests; deleting a group is RESTRICTed while docs
-   reference it; deleting a user removes their private docs + memberships
-   (§A9.1 ordering per doc), leaving groups and other members untouched.
-10. **Storage/deletion hardening regression** — F1/F3 rules hold for group
-    docs: server-generated storage names, symlink-refusing deletes, NUL/
-    reserved-name 422s (the `tests/security/` suite runs as-is).
+   about a group doc → no chunk; admin self-joins G1 → next request
+   retrieves it; the join wrote `membership_added` AND is visible in G1's
+   membership list to G1's editors (DECISION #4).
+4. **Share = COPY** — non-owner POST share → 404; owner requests with
+   consent → pending (consent text stored verbatim); G2's editor sees
+   nothing in their queue; G1's editor approves → **a NEW group document
+   exists** (different doc_id) retrievable by G1 members, **the private
+   original still exists and is still owner-only**; deny leaves only the
+   original; admin approve attempt → 404 (route absent).
+5. **No moves** — any attempt to PATCH scope/group_id → 422 (DECISION #3);
+   the service layer exposes no move function at all.
+6. **New version (C6)** — PUT content keeps the doc_id; fake store asserts
+   new chunks added BEFORE old deleted (call order), audit
+   `document_updated` written; simulated failure between phases leaves the
+   old ids in the audit details, resumable by the sweep.
+7. **Quotas** — 25 MB file → 413; 251st MB → 409; 51st doc → 409; 11th
+   upload in the hour → 429 with `Retry-After`; admin exempt; the global
+   ingest semaphore caps concurrent parses (fake slow parser + two
+   parallel uploads → one blocks).
+8. **Parser subprocess (DECISION #8)** — a file that makes the parser hang
+   or bomb hits the timeout/memory cap → 422 generic, app process alive
+   (this is the S2 behavior at scale).
+9. **Governance citations (C5)** — an answer from a group doc cites
+   **name + PDF page + last-updated**, with dates read from Postgres in
+   TX2 by doc_id (assert: vector metadata does NOT carry the dates); the
+   overdue marker appears when `review_due_at` is past; per-group
+   `review_days` overrides the 180-day global.
+10. **Insufficient-evidence contacts (DECISION #10)** — user in G1 gets
+    G1's contact; user with no groups gets `ORG_CONTACT`; never another
+    group's contact.
+11. **Admin visibility (C4)** — admin listing shows org docs per-document
+    and ZERO private rows/filenames; aggregates suppressed below 5 users;
+    near-quota users listed; bulk purge removes exactly user X's private
+    docs (+ vectors) and nothing else (org/group docs of X survive, C2).
+12. **Role gates (C1)** — membership editor: chat reads stay owner-only;
+    `users.role` CHECK unchanged (rejects 'group_editor'); last-admin
+    logic ignores memberships.
+13. **Delete consistency across the new shapes** — deleting a group doc
+    cascades its share_requests; deleting a group is RESTRICTed while docs
+    reference it; deleting a user removes ONLY their private docs
+    (+vectors, §A9.1 ordering) — their uploaded group/org docs survive
+    with `uploaded_by` NULL (C2).
+14. **Storage/deletion hardening regression** — F1/F3 rules hold for group
+    docs (the `tests/security/` suite runs as-is).
 
-### A14.9 Effect on existing code (the group phase, not this commit)
+### A14.9 Effect on existing code (the groups phase, not this commit)
 
 | File | Change |
 |---|---|
-| `app/services/retrieval.py` | becomes the Pinecone `AccessResolver` implementation; `retrieval_filter_for` keeps its signature, gains group tokens; bare-UUID transition acceptance |
-| `app/services/documents.py` | scope/group quota checks, share state machine, re-tag/re-ingest move (A14.5 option b), review-date defaults |
-| `app/api/documents.py` | NEW user-facing router (none exists today — B4 shipped CLI + legacy ingest only): the A14.7 table minus admin/groups |
-| `app/api/admin.py` | B6 admin surface gains groups/memberships; documents listing gains the k≥5 aggregates |
-| `app/api/conversations.py` | TX1 builds the filter via the resolver (signature unchanged); insufficient-state payload gains own-group contacts |
-| `app/rag/workflow.py` | citation payload extends (name + section + last-updated); insufficient node renders contacts from state; graph topology still unchanged |
-| `app/models/`, `migrations/` | M1–M3 above (0005–0007) |
-| `app/core/config.py` | quota settings, `GROUP_DOC_REVIEW_DAYS`, `ENABLE_WEB_FALLBACK` default flips to `False` (D6 amended) |
-| `app/cli.py` | `retag-read-access` operator CLI (M3), `create-group` / `add-member` conveniences |
-| `tests/security/` | the A14.8 behavior suite; the existing 31 keep passing unchanged |
+| `app/services/retrieval.py` | becomes the Pinecone `AccessResolver`; strict token grammar (no bare-UUID acceptance — DECISION #9); `is_editor` per-group helper |
+| `app/services/documents.py` | scope/group quota checks, share-COPY state machine (re-chunk to a new doc_id), version update (C6 chunk ordering), review-date defaults + overdue flag, **parser subprocess launcher (DECISION #8)** |
+| `app/api/documents.py` | NEW user-facing router: the A14.7 table minus admin |
+| `app/api/admin.py` | B6 admin surface; later gains groups/memberships (G1), aggregates + bulk purge (C4) |
+| `app/api/conversations.py` | TX1 builds the filter via the resolver; TX2 reads review/updated dates by cited doc_ids (C5) and the overdue flag; insufficient-state payload gains contacts + `ORG_CONTACT` fallback |
+| `app/rag/workflow.py` | citation payload extends (name + page + last-updated + stale); insufficient node renders contacts; graph topology still unchanged |
+| `app/models/`, `migrations/` | M1–M3 above (0005–0007); **users table untouched (C1)** |
+| `app/core/config.py` | `USER_UPLOAD_*` quotas, `INGEST_CONCURRENCY`, `GROUP_DOC_REVIEW_DAYS=180`, `ORG_CONTACT`, `ENABLE_WEB_FALLBACK` default `False` (D6 amended) |
+| `app/cli.py` | `review-overdue` report CLI (DECISION #6); `create-group` / `add-member` conveniences; **no retag CLI** (DECISION #9 conditional) |
+| `tests/security/` | the A14.8 behavior suite; the existing suite keeps passing unchanged |
 
 ### A14.10 Abuse cases for personal uploads (and their counters)
 
 | Abuse | Counter |
 |---|---|
-| Storage exhaustion (many large files) | per-file cap, total-bytes + count quotas, hourly rate limit — all server-side, per-user, not per-session |
-| Malicious/bomb files | F6 content gate at upload; parser-level size bound and timeout remain the open review finding #4 — must land WITH personal uploads, not after |
-| Sensitive content smuggled into retrievable space | share flow requires group_editor approval (an owner cannot self-publish); decided for v1: **no HR/payroll/personal-data documents**; insufficient-evidence answers route questions to humans instead of guessed content |
-| Citation spoofing ("Official VPN Policy.pdf" uploaded privately, then shared) | citations carry scope/provenance + review dates; group docs carry a named owner and review-due dates; the org KB stays admin-curated |
-| Prompt injection via document text | the untrusted-data fencing pattern (grade_web) extends to KB chunks; `test_prompt_injection.py` extended to group docs |
-| Pinecone-key holders reading private chunks | D12 unchanged and now broader (more users' docs in one namespace) — restate: metadata ACL, not vendor tenancy; namespace-per-group or client-side encryption remain the escalation options |
-| Orphaned shares / ghost access | share_requests cascade on document/group/user delete; membership revoke hits the very next request (A14.3); a failed re-tag leaves `deleting` state — never half-granted access |
-| Admin curiosity | admin listing metadata-only (+ DECISIONS #1 on filenames); no admin chat reads (test-enforced); admin group access only via audited self-join |
+| Storage exhaustion (many large files) | 25 MB/file, 250 MB/50 docs per user, 10/hour, global ingest concurrency semaphore — server-side, per-user |
+| Malicious/bomb files | F6 content gate at upload; **parser subprocess with timeout + memory limit** (DECISION #8) closes review finding #4 properly |
+| Sensitive content smuggled into retrievable space | share = COPY with **explicit stored consent text** + editor approval (an owner cannot self-publish); v1 rule: **no HR/payroll/personal-data documents**; insufficient-evidence answers route questions to humans |
+| Citation spoofing ("Official VPN Policy.pdf" uploaded privately, then shared) | citations carry name + page + last-updated and the overdue marker; group docs have review dates + auditable `uploaded_by`; the org KB stays admin-curated |
+| Prompt injection via document text | untrusted-data fencing (grade_web pattern) extends to KB chunks; `test_prompt_injection.py` extended to group docs |
+| Pinecone-key holders reading private chunks | D12 unchanged (metadata ACL, not vendor tenancy); re-checked at G1 |
+| Orphaned shares / ghost access | share_requests cascade on document/group/user delete; a share COPY is a separate document — deleting the original never widens the copy's audience; membership revoke hits the very next request |
+| Admin curiosity | no per-document private view, no filenames, aggregates k≥5 (DECISION #1 + C4); no admin chat reads (test-enforced); admin group access only via audited self-join visible to editors |
+| Runaway ingestion cost | global `INGEST_CONCURRENCY` semaphore + per-user rate limit (DECISION #7) |
 
-### A14.11 DECISIONS FOR FARHAD
+### A14.11 DECISIONS — CLOSED 2026-11-09 (outcomes recorded)
 
-1. **Admin visibility of private filenames** — recommendation: **hide**
-   (admin sees size/count/status/quota only; a filename is often the leak
-   itself).
-2. **Share semantics** — recommendation: an approved share **re-tags the
-   doc to the group** (scope=group, owner kept for governance) rather than
-   adding a `read_access` grant to a still-private doc (cleaner
-   delete/ownership semantics; slightly bigger mental model for the owner).
-3. **Audience-change mechanics in Pinecone** — recommendation: **delete +
-   re-ingest from the stored file** for v1 (option b, A14.5); the
-   deterministic per-vector `update_metadata` is the later optimization.
-4. **Admin implicit access to group documents** — recommendation: **none**;
-   admins join groups explicitly via the audited membership surface when
-   they truly need retrieval (keeps "admin sees org, edits org" crisp).
-5. **Membership management** — recommendation: admins only in v1 (group
-   editors manage documents, not people); revisit if group self-service
-   becomes a real ask.
-6. **`GROUP_DOC_REVIEW_DAYS` default + reminder surface** — recommendation:
-   365 days; reminders = a CLI/report listing overdue docs (no email in
-   v1); contacts are only involved when mail exists.
-7. **Quota defaults** — recommendation: `USER_UPLOAD_MAX_MB=25` (= global
-   cap), `USER_UPLOAD_TOTAL_MB=250`, `USER_UPLOAD_MAX_DOCS=50`,
-   `USER_UPLOADS_PER_HOUR=10`; admins exempt from personal quotas (org
-   uploads are their job anyway) — confirm or adjust.
-8. **Background ingestion shape for v1** — recommendation: keep in-request
-   processing (B4 behavior) with `status` already visible; introduce a
-   worker only when upload latency actually annoys someone.
-9. **B4→group vector token migration** — recommendation: the
-   `retag-read-access` CLI with dry-run + the b4.sh-style recompute
-   verification, and the resolver accepting bare UUIDs for one transition
-   release (belt and braces) — not a full re-ingest of every document.
-10. **Group `contact` field** — recommendation: nullable free text (an
-    alias or room, not a user FK) shown on insufficient answers for the
-    user's own groups only; admins set it per group.
+1. **Admin visibility of private filenames → HIDDEN.** Admin listings
+   carry no private per-document rows at all (C4); aggregates + near-quota
+   users only.
+2. **Share semantics → COPY.** Approved share creates a NEW group document
+   from the same stored bytes; the private original stays; explicit
+   consent text stored on the request (A14.5).
+3. **Audience moves → NONE in v1**; if ever needed: delete + re-ingest
+   (A14.5.4).
+4. **Admin implicit group access → NONE.** Admin self-join is audited AND
+   visible to that group's editors (A14.2, A14.3).
+5. **Membership management → ADMIN-ONLY** (A14.2).
+6. **Review cadence → `GROUP_DOC_REVIEW_DAYS=180`, per-group override
+   column, overdue marker in answers, CLI report** (A14.4 M1/M2).
+7. **Quotas → 25 MB / 250 MB / 50 docs / 10 per hour; admin exempt; plus a
+   global ingest concurrency limit** (A14.6).
+8. **Ingestion → in-request, parser in a subprocess with timeout and
+   memory limit** (A14.6; also closes review finding #4; S2 defines the
+   user-facing 422).
+9. **Vector token migration → inspect rag-v2 for bare UUIDs first; none ⇒
+   no migration and no bare-UUID acceptance; some ⇒ delete + re-ingest**
+   (A14.1, A14.4 M3).
+10. **Group contact → nullable text, plus `ORG_CONTACT` fallback for users
+    without groups** (A14.4 M1).
+
+**Corrections applied: C1** membership-role editors, `users.role` stays
+`user|admin`; **C2** org+group docs ownerless (`owner_id NULL`),
+`uploaded_by` nullable SET NULL, user deletion never removes group/org
+docs; **C3** admin delete-any / update-org-only; **C4** aggregates +
+near-quota list, no per-document private view, bulk purge endpoint;
+**C5** citations = name + PDF page + last-updated (sections deferred),
+dates read from Postgres in TX2 by doc_id, never frozen in metadata;
+**C6** content update = same doc_id, add-new-then-delete-old, audited;
+**C7** step order B5 → B6 → G1 → G2 → B8 → B9, review checkpoints after
+G1 and G2 (see §A12); **C8** the D2 drop script is obsolete — the legacy
+audit writer and `init_db` are REMOVED (B5), no `query_audit` drop runs.
