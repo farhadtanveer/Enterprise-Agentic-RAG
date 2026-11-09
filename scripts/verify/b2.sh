@@ -36,6 +36,12 @@ ck() {  # ck <desc> <expected> <actual>
 }
 ckc() { # ck_contains <desc> <needle> <haystack-file-or-string>
   local desc="$1" needle="$2" hay="$3"
+  # F7: empty-guard (same as b3/b4) — an empty needle makes grep -qi ""
+  # match ANYTHING (vacuous pass), and an empty haystack means an upstream
+  # step failed. Both FAIL loudly instead of passing silently.
+  if [ -z "$needle" ] || [ -z "$hay" ]; then
+    echo "FAIL  $desc  (EMPTY needle/haystack — upstream step failed)"; FAIL=$((FAIL+1)); return
+  fi
   if printf '%s' "$hay" | grep -qi "$needle"; then
     echo "PASS  $desc  (found: $needle)"; PASS=$((PASS+1))
   else

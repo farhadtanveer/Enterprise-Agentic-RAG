@@ -290,7 +290,9 @@ from app.rag.vectorstore import ensure_index, _chunk_id
 from app.services.ingestion import load_file, chunk_documents
 ids = set(i for page in ensure_index().list(namespace='$NS') for i in page)
 a_ids = {_chunk_id('$PA_DOC_ID', c) for c in chunk_documents(load_file(Path('/tmp/policy-notes-A.txt')))}
-print('A-GONE', a_ids <= (ids - a_ids), len(a_ids & ids))
+# F7: the old first flag (a_ids <= ids - a_ids) was a tautology — the
+# intersection count below IS the assertion (ck compares it against 0).
+print('A-GONE', len(a_ids & ids))
 " 2>&1)
 echo "      A-gone raw: $(printf '%s' "$AGONE_RAW" | tail -2 | tr '\n' '; ')"
 AGONE=$(printf '%s' "$AGONE_RAW" | grep '^A-GONE' | cut -d' ' -f2-)
