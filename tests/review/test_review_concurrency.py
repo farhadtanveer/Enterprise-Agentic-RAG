@@ -173,3 +173,33 @@ def test_delete_during_pending_send_must_not_500(prod_client_factory, monkeypatc
         "answer lost, no error-status marker row) — serialize the delete "
         "against TX2 or translate the FK violation into a clean 502"
     )
+
+
+def test_send_after_delete_completed_is_clean_404(prod_client_factory, monkeypatch):
+    """F2, second order: the delete COMPLETES first, then a send arrives.
+    The normal ownership lookup applies — a clean 404 (same as any
+    nonexistent conversation), never a crash. Together with the in-flight
+    order above this covers both interleavings: delete-wins semantics with
+    the send ending 200/404/409/502 — never a raw framework 500."""
+    factory = prod_client_factory
+    username, conv_id = _make_user_and_conv(factory, "deleted-first")
+    sid, csrf = _login(factory, username)
+
+    calls = []
+    monkeypatch.setattr(conv_api, "ask", slow_ask(calls, delay=0.05))
+
+    deleter = factory["client_for"](cookie_token=sid, csrf=csrf)
+    r_del = deleter.delete(f"/api/conversations/{conv_id}", headers={"X-CSRF-Token": csrf})
+    assert r_del.status_code == 200, r_del.text
+
+    sender = factory["client_for"](cookie_token=sid, csrf=csrf)
+    r_send = sender.post(
+        f"/api/conversations/{conv_id}/messages",
+        json={"question": "after delete"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert r_send.status_code == 404, (
+        f"send to a deleted conversation returned {r_send.status_code} — "
+        "want the clean ownership 404"
+    )
+    assert calls == [], "the graph must never run for a deleted conversation"

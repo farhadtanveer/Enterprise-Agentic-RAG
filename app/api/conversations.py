@@ -11,7 +11,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import get_current_user
 from app.core.config import get_settings
@@ -210,16 +212,32 @@ def send_message(
         logger.error("chat graph failed for a conversation message")
         duration_ms = int((time.perf_counter() - started) * 1000)
         # --- TX2 (failure): the user message STAYS; assistant row status=error
-        conv_service.add_message(
-            db, conv, "assistant", "", msg_status="error",
-            model=settings.openai_model, duration_ms=duration_ms,
-        )
-        record_event(
-            db, "chat_failed", actor_user_id=user.id,
-            object_type="conversation", object_id=conv.id,
-            outcome="error", route=SEND_ROUTE, duration_ms=duration_ms,
-        )
-        db.commit()
+        try:
+            conv_service.add_message(
+                db, conv, "assistant", "", msg_status="error",
+                model=settings.openai_model, duration_ms=duration_ms,
+            )
+            record_event(
+                db, "chat_failed", actor_user_id=user.id,
+                object_type="conversation", object_id=conv.id,
+                outcome="error", route=SEND_ROUTE, duration_ms=duration_ms,
+            )
+            db.commit()
+        except (IntegrityError, StaleDataError):
+            # F2 (review finding 2): the conversation was DELETED while the
+            # graph ran — messages follow via ON DELETE CASCADE, so neither
+            # the error-marker row nor the audit event has a parent to
+            # attach to. The flush can raise IntegrityError (orphan message
+            # INSERT) or StaleDataError (the conv.last_message_at UPDATE
+            # matched 0 rows — SQLAlchemy checks rowcounts on the flush).
+            # DELETE-WINS semantics (see below): discard the result, return
+            # the same clean 502 the graph-failure path uses — never a raw
+            # framework 500.
+            db.rollback()
+            raise HTTPException(
+                status_code=502,
+                detail="The assistant failed to answer. You can retry.",
+            ) from None
         raise HTTPException(
             status_code=502, detail="The assistant failed to answer. You can retry."
         ) from None
@@ -227,24 +245,42 @@ def send_message(
     duration_ms = int((time.perf_counter() - started) * 1000)
     usage = result.get("token_usage") or {}
     # --- TX2 (success): answer + citations + trace + timings + tokens ------
-    assistant = conv_service.add_message(
-        db, conv, "assistant", result["answer"],
-        citations=result.get("citations", []),
-        trace=result.get("trace", []),
-        source_used=result.get("source_used"),
-        rewritten_query=result.get("current_query"),
-        model=settings.openai_model,
-        prompt_tokens=usage.get("prompt_tokens"),
-        completion_tokens=usage.get("completion_tokens"),
-        duration_ms=duration_ms,
-    )
-    # audit: counts and status ONLY — no question/answer/trace/title (§A6)
-    record_event(
-        db, "chat_asked", actor_user_id=user.id,
-        object_type="conversation", object_id=conv.id,
-        outcome="ok", route=SEND_ROUTE, duration_ms=duration_ms,
-        tokens_total=usage.get("total_tokens"),
-        details={"source_used": result.get("source_used"), "status": "ok"},
-    )
-    db.commit()
+    # F2 delete-during-send semantics: the delete path takes no send lock and
+    # the user may legitimately delete a conversation at any moment (the
+    # acceptance test pins DELETE == 200 even mid-send), so a delete CAN land
+    # between TX1's commit and TX2 — the answer then has no parent row: the
+    # conv.last_message_at UPDATE matches 0 rows (StaleDataError) and/or the
+    # assistant INSERT is an orphan (FK IntegrityError). We DISCARD the
+    # result (the conversation — and with it every message — is gone by the
+    # owner's explicit choice) and return a CLEAN 502 with the same static
+    # body the graph-failure path uses; a 404 would under-report (the send
+    # WAS accepted and the graph ran) and a retryable-looking 409 would
+    # point at a conversation that no longer exists. Never a raw 500.
+    try:
+        assistant = conv_service.add_message(
+            db, conv, "assistant", result["answer"],
+            citations=result.get("citations", []),
+            trace=result.get("trace", []),
+            source_used=result.get("source_used"),
+            rewritten_query=result.get("current_query"),
+            model=settings.openai_model,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            duration_ms=duration_ms,
+        )
+        # audit: counts and status ONLY — no question/answer/trace/title (§A6)
+        record_event(
+            db, "chat_asked", actor_user_id=user.id,
+            object_type="conversation", object_id=conv.id,
+            outcome="ok", route=SEND_ROUTE, duration_ms=duration_ms,
+            tokens_total=usage.get("total_tokens"),
+            details={"source_used": result.get("source_used"), "status": "ok"},
+        )
+        db.commit()
+    except (IntegrityError, StaleDataError):
+        db.rollback()
+        logger.error("conversation deleted while a chat answer was in flight")
+        raise HTTPException(
+            status_code=502, detail="The assistant failed to answer. You can retry."
+        ) from None
     return conv_service.message_payload(assistant)
