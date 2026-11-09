@@ -221,3 +221,25 @@ def test_text_validator_unit_contract():
             pass
         else:
             raise AssertionError(f"validator accepted {bad!r}")
+
+
+def test_pdf_magic_rejection_is_pre_row(db_session, tmp_path, monkeypatch):
+    """S3 mutation follow-up: the F6 magic gate must reject BEFORE any
+    document row or stored file exists (415) — not merely fail later in
+    the parser with the same status window. This pins the fast-fail
+    contract so disabling the magic check cannot survive by falling
+    through to the parser-stage 422."""
+    with ingest_client(db_session, tmp_path, monkeypatch) as (client, uploads):
+        r = post_file(client, "totally-a-pdf.pdf", b"this is not a pdf at all")
+        assert r.status_code == 415, r.text
+        assert "does not match" in r.text
+        # no row was ever created
+        from sqlalchemy import select as _select
+
+        from app.models.document import Document
+
+        rows = db_session.execute(_select(Document)).scalars().all()
+        assert rows == [], "a document row was created for a magic-rejected file"
+        # and no stored file either
+        if uploads.exists():
+            assert not any(p.is_file() for p in uploads.rglob("*"))
