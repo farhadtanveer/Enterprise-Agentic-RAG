@@ -104,7 +104,13 @@ def search_web(state: AgentState):
     # Treat that as a failed search, never as "no results".
     if isinstance(result, dict) and result.get("error"):
         error = result["error"]
-        logger.warning("Tavily search failed: %s", error)
+        # F5 (review finding 6, design §A6): log the exception CLASS and the
+        # HTTP status code only — upstream error bodies can embed the QUERY
+        # that triggered them, and shared logs must stay query-free. The
+        # full text stays in the caller-owned trace, never in the logs.
+        status = result.get("status") if isinstance(result, dict) else None
+        error_class = type(error).__name__ if not isinstance(error, str) else "TavilyError"
+        logger.warning("Tavily search failed: %s (status=%s)", error_class, status)
         return {
             "web_results": "",
             "citations": [],
