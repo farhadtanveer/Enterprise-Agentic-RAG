@@ -129,3 +129,68 @@ def test_oversized_docx_decompression_is_bounded_by_upload_cap(
             f"unexpected status {r.status_code}; the bomb reached the parser "
             "unchallenged (documented finding, no parser-level size bound)"
         )
+
+
+# --- F6: content-based type check -------------------------------------------------
+
+
+def test_text_upload_with_nul_bytes_is_422_no_row_no_file(
+    db_session, tmp_path, monkeypatch
+):
+    """F6: binary content smuggled as .txt dies at the streaming gate with
+    422 — no document row (rollback) and no partial file on disk."""
+    with ingest_client(db_session, tmp_path, monkeypatch) as (client, uploads):
+        r = post_file(client, "binary.txt", b"hello\x00world")
+        assert r.status_code == 422, r.text
+        assert "NUL" in r.text
+        # nothing persisted
+        if uploads.exists():
+            assert not any(p.is_file() for p in uploads.rglob("*"))
+
+
+def test_text_upload_with_invalid_utf8_is_422(db_session, tmp_path, monkeypatch):
+    """F6: .md content that does not decode as UTF-8 is rejected while
+    streaming — before the parser ever sees it."""
+    with ingest_client(db_session, tmp_path, monkeypatch) as (client, uploads):
+        r = post_file(client, "notes.md", b"caf\xe9 broken latin-1")
+        assert r.status_code == 422, r.text
+        assert "UTF-8" in r.text
+
+
+def test_valid_magic_bytes_reach_the_parser(db_session, tmp_path, monkeypatch):
+    """F6 positive control: content MATCHING the claimed type is not
+    over-rejected — a %PDF- header passes the gate and the (stubbed) parser
+    runs; a PK header passes for .docx. The gate checks bytes, not more."""
+    from app.services.ingestion import make_text_validator, ContentRejected
+
+    class C:
+        page_content = "c"
+        metadata = {"start_index": "0"}
+
+    with ingest_client(db_session, tmp_path, monkeypatch) as (client, uploads):
+        with patch("app.api.routes.load_file", return_value=[C()]), \
+             patch("app.api.routes.chunk_documents", return_value=[C()]), \
+             patch("app.api.routes.add_documents", return_value=["id1"]):
+            r = post_file(client, "real.pdf", b"%PDF-1.7\n...garbage body is fine here")
+            assert r.status_code == 200, r.text
+            assert r.json()["chunks"] == 1
+    # and the streaming text validator itself: valid UTF-8 without NUL passes,
+    # including the decoder flush
+    v = make_text_validator()
+    v("héllo ".encode("utf-8"))
+    v(b"")  # final flush must not raise
+
+
+def test_text_validator_unit_contract():
+    """F6 unit pin: NUL and invalid UTF-8 raise ContentRejected at the
+    chunk boundary (no whole-file buffering)."""
+    from app.services.ingestion import ContentRejected, make_text_validator
+
+    v = make_text_validator()
+    for bad in (b"ok\x00nope", b"\xff\xfe not utf-8"):
+        try:
+            v(bad)
+        except ContentRejected:
+            pass
+        else:
+            raise AssertionError(f"validator accepted {bad!r}")

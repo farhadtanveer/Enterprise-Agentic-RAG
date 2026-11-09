@@ -80,7 +80,9 @@ class UploadRejected(Exception):
     """Raised when the stored name or an existing path is unsafe (maps to 422)."""
 
 
-def save_upload_stream(fileobj, *, dest_dir: Path, storage_name: str) -> tuple[Path, int, str]:
+def save_upload_stream(
+    fileobj, *, dest_dir: Path, storage_name: str, chunk_validator=None
+) -> tuple[Path, int, str]:
     """Stream the upload to ``dest_dir/<storage_name>`` under the byte cap.
 
     F1: the stored name is SERVER-GENERATED (the route/CLI pass
@@ -88,6 +90,9 @@ def save_upload_stream(fileobj, *, dest_dir: Path, storage_name: str) -> tuple[P
     filesystem path component. ``storage_name`` must be a pure basename;
     the destination must not already exist (exclusive create, so a
     pre-planted symlink or file can never be written through).
+
+    F6: ``chunk_validator`` (optional) inspects every chunk as it streams —
+    e.g. the text NUL/UTF-8 contract — so rejected content never lands.
 
     Enforces MAX_UPLOAD_MB while streaming (a lying Content-Length can't
     blow past it); removes the partial file on any failure. Returns
@@ -120,8 +125,12 @@ def save_upload_stream(fileobj, *, dest_dir: Path, storage_name: str) -> tuple[P
                     raise UploadTooLarge(
                         f"upload exceeds MAX_UPLOAD_MB={get_settings().max_upload_mb}"
                     )
+                if chunk_validator is not None:
+                    chunk_validator(chunk)
                 digest.update(chunk)
                 out.write(chunk)
+            if chunk_validator is not None:
+                chunk_validator(b"")  # flush any pending incremental decoder state
     except Exception:
         # working-tree safety rule: on failure remove only the PARTIAL FILE
         # this call created — never a directory. The (now empty) per-document

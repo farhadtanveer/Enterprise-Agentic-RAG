@@ -9,7 +9,14 @@ from app.core.db import get_db
 from app.rag.workflow import ask
 from app.rag.vectorstore import add_documents
 from app.services import documents as documents_service
-from app.services.ingestion import load_file, chunk_documents, SUPPORTED
+from app.services.ingestion import (
+    ContentRejected,
+    content_matches_suffix,
+    load_file,
+    chunk_documents,
+    make_text_validator,
+    SUPPORTED,
+)
 from app.services.audit import write_audit
 from app.services.audit_events import record_event
 from app.services.ratelimit import SlidingWindowLimiter
@@ -103,6 +110,19 @@ async def ingest(
     if suffix not in SUPPORTED:
         raise HTTPException(status_code=400, detail=f"Supported: {', '.join(sorted(SUPPORTED))}")
 
+    # F6 (review finding 4): type by CONTENT, not by the client-controlled
+    # suffix — sniff the first bytes BEFORE creating any row or writing any
+    # file. PDF must start with %PDF-, docx with a ZIP local file header;
+    # .txt/.md have no cheap magic and are validated for UTF-8/NUL while
+    # streaming instead.
+    header = file.file.read(8)
+    file.file.seek(0)
+    if not content_matches_suffix(header, suffix):
+        raise HTTPException(
+            status_code=415,
+            detail="File content does not match the claimed type",
+        )
+
     # reject early on Content-Length when the client told the truth (§A7)
     max_bytes = settings.max_upload_mb * 1024 * 1024
     if file.size is not None and file.size > max_bytes:
@@ -116,6 +136,9 @@ async def ingest(
         dest, size, checksum = documents_service.save_upload_stream(
             file.file, dest_dir=Path(settings.upload_dir) / str(doc.id),
             storage_name=f"{doc.id}{suffix}",  # F1: server-generated stored name
+            chunk_validator=(
+                make_text_validator() if suffix in {".txt", ".md"} else None
+            ),
         )
     except documents_service.UploadTooLarge:
         db.rollback()  # the pending row dies with the request transaction
@@ -123,6 +146,12 @@ async def ingest(
     except documents_service.UploadRejected:
         db.rollback()  # the pending row dies with the request transaction
         raise HTTPException(status_code=422, detail="Invalid storage name") from None
+    except ContentRejected:
+        db.rollback()  # no row, no partial file — content contract violated
+        raise HTTPException(
+            status_code=422,
+            detail="Text upload must be valid UTF-8 without NUL bytes",
+        ) from None
     doc.storage_path = str(dest)
     doc.size_bytes = size
     doc.checksum = checksum

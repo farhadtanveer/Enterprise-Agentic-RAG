@@ -107,26 +107,45 @@ def unlock(username: str) -> None:
 def _ingest_one(db, *, path: Path, scope: str, owner_id, source_label: str) -> str:
     from app.rag.vectorstore import add_documents
     from app.services import documents as docs_service
-    from app.services.ingestion import chunk_documents, load_file
+    from app.services.ingestion import (
+        ContentRejected,
+        chunk_documents,
+        content_matches_suffix,
+        load_file,
+        make_text_validator,
+    )
     from app.services.validation import display_name_problems
 
     display_name = path.name
+    suffix = path.suffix.lower()
     problems = display_name_problems(display_name)
     if problems:
         # F3: the same hygiene rules apply to operator-supplied names
         raise click.ClickException(
             f"invalid filename {display_name!r}: " + "; ".join(problems)
         )
+    # F6: same content-vs-suffix gate as the API
+    with path.open("rb") as fh:
+        header = fh.read(8)
+    if not content_matches_suffix(header, suffix):
+        raise click.ClickException(
+            f"{display_name!r}: content does not match the {suffix} type"
+        )
     doc = docs_service.create_document(
         db, scope=scope, owner_id=owner_id, display_name=display_name,
         storage_path="", checksum="", size_bytes=0,
-        mime_suffix=path.suffix.lower() or None,
+        mime_suffix=suffix or None,
     )
     dest_dir = Path(get_settings().upload_dir) / str(doc.id)
-    dest, size, checksum = docs_service.save_upload_stream(
-        path.open("rb"), dest_dir=dest_dir,
-        storage_name=f"{doc.id}{path.suffix.lower()}",  # F1: server-generated
-    )
+    try:
+        dest, size, checksum = docs_service.save_upload_stream(
+            path.open("rb"), dest_dir=dest_dir,
+            storage_name=f"{doc.id}{suffix}",  # F1: server-generated
+            chunk_validator=make_text_validator() if suffix in {".txt", ".md"} else None,
+        )
+    except ContentRejected as exc:
+        db.rollback()  # the pending row dies; partial file already removed
+        raise click.ClickException(f"{display_name!r}: {exc}") from None
     doc.storage_path = str(dest)
     doc.size_bytes = size
     doc.checksum = checksum
