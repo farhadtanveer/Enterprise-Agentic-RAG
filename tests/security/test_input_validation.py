@@ -84,7 +84,7 @@ def _post(client, name, data=b"hello"):
 def test_ingest_rejects_reserved_and_control_names_with_422(db_session, tmp_path, monkeypatch):
     # note: httpx percent-encodes NUL inside a filename, so the RAW-NUL case
     # is covered by the manual-multipart acceptance test
-    # (test_review_destructive_paths.py::test_ingest_raw_nul_filename_is_client_error_not_500);
+    # (test_destructive_paths.py::test_ingest_raw_nul_filename_is_client_error_not_500);
     # this test exercises the other F3 rejections through the API.
     with _ingest_client(db_session, tmp_path, monkeypatch) as client, \
          patch(f"{MODULE}.load_file"), \

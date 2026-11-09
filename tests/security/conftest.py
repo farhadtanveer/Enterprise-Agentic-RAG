@@ -1,9 +1,10 @@
-"""Shared fixtures for the independent security-review tests (tests/review/).
+"""Fixtures for the permanent security-regression suite (tests/security/).
 
-These tests were written by an independent reviewer against the
-backend/multi-user branch. They follow the same house rules as the rest of
-the suite: offline (no API keys), no real Pinecone, no destructive
-directory operations (single files under tmp_path only).
+Origin: written by an independent reviewer against backend/multi-user
+(review commit a41228c, findings fixed in a7d3201..45e1aac) and promoted
+into the permanent suite in F8. House rules: offline (no API keys), no
+real Pinecone, no destructive directory operations (single files under
+tmp_path only).
 
 Two client flavors:
 - ``client``     — joins the caller's rollback-per-test ``db_session``
