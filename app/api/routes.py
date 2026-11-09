@@ -69,7 +69,10 @@ def chat(payload: ChatRequest, request: Request, x_api_key: str = Header(default
         }
 
     except Exception as exc:
-        logger.exception("chat request failed")
+        # F4 (review finding 5): static line + exception CLASS only.
+        # logger.exception embedded the full traceback, and upstream
+        # exceptions can echo the QUESTION verbatim into shared logs.
+        logger.error("chat request failed: %s", type(exc).__name__)
         raise HTTPException(status_code=500, detail="Internal error") from exc
 
 
@@ -130,7 +133,7 @@ async def ingest(
         ids = add_documents(
             chunks, doc_id=doc.id, scope="org", owner_id=None, source_name=display_name
         )
-    except Exception:
+    except Exception as exc:
         documents_service.mark_failed(db, doc, "ingest_failed")
         record_event(
             db, "document_uploaded", object_type="document", object_id=doc.id,
@@ -138,7 +141,10 @@ async def ingest(
             details={"scope": "org", "via": "legacy_ingest", "error_class": "ingest_failed"},
         )
         db.commit()
-        logger.exception("legacy ingest failed")
+        # F4: same rule as the chat path — parser errors can embed file
+        # content (e.g. XML fragments from a malformed docx); log the class
+        # only, never the exception body.
+        logger.error("legacy ingest failed: %s", type(exc).__name__)
         raise HTTPException(status_code=500, detail="Ingest failed") from None
 
     documents_service.attach_ingest_result(db, doc, len(chunks))

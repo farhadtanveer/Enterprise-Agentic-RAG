@@ -183,8 +183,13 @@ def complete_delete(db: DBSession, doc_id: UUID, *, actor_user_id=None) -> None:
                         "file under upload_dir %s",
                         allowed_root,
                     )
-            except OSError:
-                logger.exception("complete_delete could not remove the stored file")
+            except OSError as exc:
+                # F4 hygiene: class only — the row's storage_path is in the
+                # DB if an operator needs the full picture
+                logger.error(
+                    "complete_delete could not remove the stored file: %s",
+                    type(exc).__name__,
+                )
 
 
 def list_stuck_deletes(db: DBSession) -> list[Document]:
