@@ -45,3 +45,26 @@ jobs:
         run: pip install pip-audit==2.10.1
       - name: Scan pinned dependencies for known CVEs
         run: pip-audit -r requirements.txt
+
+  sast:
+    # Static application security testing (security-review follow-up):
+    # both gates FAIL ONLY ON HIGH-SEVERITY findings — lower severities are
+    # triaged in docs/review/security-review.md and the code comments.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install bandit
+        run: pip install bandit==1.9.4
+      - name: Bandit — fail on high severity only
+        run: bandit -r app --severity-level high --confidence-level medium
+      - name: Semgrep — fail on high (ERROR) severity only
+        # pinned image tag: semgrep has no pip release for Windows dev
+        # machines; the registry ruleset (p/default) with --severity ERROR
+        # gates the high tier. Suppressions in code carry a JUSTIFIED
+        # comment explaining why the finding is a false positive.
+        run: >
+          docker run --rm -v "$PWD:/src" semgrep/semgrep:1.183.0
+          semgrep scan --config p/default --severity ERROR --error --quiet /src/app

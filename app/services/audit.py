@@ -27,7 +27,10 @@ def init_db() -> None:
     existing = {row[1] for row in con.execute("PRAGMA table_info(query_audit)")}
     for column, decl in _SCHEMA_COLUMNS.items():
         if column not in existing:
-            con.execute(f"ALTER TABLE query_audit ADD COLUMN {column} {decl}")
+            # JUSTIFIED (SAST high-gate review): column/decl come from the
+            # module-level _SCHEMA_COLUMNS constant whitelist — no user
+            # input can reach this statement text.
+            con.execute(f"ALTER TABLE query_audit ADD COLUMN {column} {decl}")  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
     con.commit()
     con.close()
 
@@ -40,6 +43,11 @@ def write_audit(
     duration_ms: int | None = None,
 ) -> None:
     con = sqlite3.connect(settings.audit_db_path)
+    # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
+    # JUSTIFIED (SAST high-gate review): the statement text is a compile-time
+    # constant and every value is bound via sqlite3's ? placeholder - no input
+    # ever reaches SQL text. The f-string ALTER TABLE in init_db()
+    # interpolates the module-level _SCHEMA_COLUMNS constant dict only.
     con.execute(
         """INSERT INTO query_audit(created_at, question, source_used, trace_json,
                                     client_ip, authenticated, duration_ms)

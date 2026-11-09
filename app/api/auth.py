@@ -23,7 +23,6 @@ settings = get_settings()
 login_limiter = SlidingWindowLimiter(settings.login_rate_limit_per_minute)
 
 LOGIN_ROUTE = "/api/auth/login"
-PASSWORD_ROUTE = "/api/auth/password"
 LOGOUT_ROUTE = "/api/auth/logout"
 
 
