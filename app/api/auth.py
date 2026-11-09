@@ -8,6 +8,7 @@ at all — §A6/§A11.13).
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import delete as sa_delete
 from sqlalchemy.orm import Session as DBSession
 
 from app.api.deps import get_current_user
@@ -193,3 +194,49 @@ def change_password(
 def me(response: Response, user: User = Depends(get_current_user)) -> dict:
     response.headers["Cache-Control"] = "no-store"
     return {"user": _user_payload(user)}
+
+
+@router.delete("/me")
+def delete_me(
+    request: Request,
+    response: Response,
+    confirm: str = "",
+    user: User = Depends(get_current_user),
+    db = Depends(get_db),
+) -> dict:
+    """§A8/A9 self-delete: conversations/messages/feedback/sessions and the
+    user's PRIVATE documents (+vectors + files, §A9.1 vectors-first) go;
+    org documents are ownerless (C2) and survive; audit rows keep their
+    event counts with actor_user_id anonymized (FK ON DELETE SET NULL).
+    The last-admin guard applies to self-deletion too (409)."""
+    from fastapi import HTTPException
+
+    from app.rag.vectorstore import delete_document_vectors
+    from app.services import documents as documents_service
+    from app.services import users as users_service
+
+    if confirm != "true":
+        raise HTTPException(
+            status_code=422, detail="Delete requires confirm=true (double confirmation)"
+        )
+    if users_service.would_leave_zero_admins(db, user):
+        raise HTTPException(status_code=409, detail={"code": "last_admin"})
+    docs = documents_service.private_documents_of(db, user.id)
+    for d in docs:
+        delete_document_vectors(str(d.id))
+        documents_service.remove_stored_file(d.storage_path)
+    user_id = user.id
+    sessions.revoke_session(db, request.state.session_row)
+    db.execute(sa_delete(User).where(User.id == user_id))
+    # the actor IS the deleted row: the audit FK cannot reference it on
+    # INSERT, so the self-deletion event is recorded anonymously (details
+    # keep the counts; §A9 anonymization applies to attribution anyway)
+    record_event(
+        db, "user_deleted", actor_user_id=None,
+        object_type="user", object_id=user_id, outcome="ok",
+        details={"self": True, "private_documents": len(docs)},
+    )
+    db.commit()
+    _clear_auth_cookies(response)
+    response.headers["Cache-Control"] = "no-store"
+    return {"status": "deleted", "private_documents": len(docs)}

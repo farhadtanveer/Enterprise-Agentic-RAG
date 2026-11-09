@@ -90,19 +90,28 @@ def record_failure(
 
 
 def reset(db: DBSession, username: str, ip: str) -> None:
-    """Successful login clears the counter for that pair (§A5)."""
-    db.execute(
-        delete(LoginThrottle).where(
+    """Successful login clears the counter for that pair (§A5).
+
+    B6: ORM-style (was a Core ``DELETE``) — Core statements bypass the unit
+    of work and broke the savepoint-rollback test pattern (and there are
+    only ever 1-2 rows per pair, so the ORM loop costs nothing)."""
+    row = db.execute(
+        select(LoginThrottle).where(
             LoginThrottle.username_hash == _username_hash(username), LoginThrottle.ip == ip
         )
-    )
-    db.flush()
+    ).scalar_one_or_none()
+    if row is not None:
+        db.delete(row)
+        db.flush()
 
 
 def clear_for_username(db: DBSession, username: str) -> int:
     """Operator recovery (``python -m app.cli unlock``): drop every counter
     row for this username, across all IPs. Returns rows removed."""
-    result = db.execute(
-        delete(LoginThrottle).where(LoginThrottle.username_hash == _username_hash(username))
-    )
-    return result.rowcount
+    rows = db.execute(
+        select(LoginThrottle).where(LoginThrottle.username_hash == _username_hash(username))
+    ).scalars().all()
+    for row in rows:
+        db.delete(row)
+    db.flush()
+    return len(rows)

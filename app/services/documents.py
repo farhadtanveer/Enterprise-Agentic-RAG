@@ -149,11 +149,67 @@ def begin_delete(db: DBSession, doc: Document) -> None:
     db.flush()
 
 
+def remove_stored_file(storage_path: str | None) -> bool:
+    """F1-hardened single-file removal (the ONLY way any code deletes a
+    stored document file). Returns True when the file was unlinked.
+
+    Working-tree safety rule (2026-11-05 incident), hardened by the
+    security review (F1): code that deletes files may delete a SINGLE
+    REGULAR FILE whose REAL path is inside the configured upload_dir —
+    never a directory derived from DB values or settings defaults — and
+    never a SYMLINK: if any component of the stored path (final name or an
+    intermediate directory) is a symlink, the resolved real path differs
+    from the plain absolute path and the unlink is refused. The
+    per-document directory may remain (empty); pruning empty dirs is an
+    operator action, not something DB-driven code does.
+    """
+    if not storage_path:
+        return False
+    try:
+        storage = Path(storage_path)
+        real = Path(os.path.realpath(storage))
+        plain = Path(os.path.abspath(storage))
+        allowed_root = Path(get_settings().upload_dir).resolve()
+        if real != plain:
+            logger.error(
+                "remove_stored_file refusing symlinked storage path — "
+                "resolves to %s",
+                real.name,
+            )
+        elif real.is_symlink() or storage.is_symlink():
+            logger.error("remove_stored_file refusing symlink final component")
+        elif real.is_file() and allowed_root in real.parents:
+            real.unlink(missing_ok=True)
+            return True
+        else:
+            logger.error(
+                "remove_stored_file refusing to unlink — not a regular "
+                "file under upload_dir %s",
+                allowed_root,
+            )
+    except OSError as exc:
+        # F4 hygiene: class only — the row's storage_path is in the DB if
+        # an operator needs the full picture
+        logger.error("remove_stored_file could not remove the stored file: %s",
+                     type(exc).__name__)
+    return False
+
+
+def private_documents_of(db: DBSession, user_id) -> list[Document]:
+    """All private documents owned by the user (the §A9.1 cleanup set)."""
+    return list(
+        db.execute(
+            select(Document).where(
+                Document.scope == "private", Document.owner_id == user_id
+            )
+        ).scalars().all()
+    )
+
+
 def complete_delete(db: DBSession, doc_id: UUID, *, actor_user_id=None) -> None:
     """TX2: vectors are already gone — remove the row and the stored file."""
     doc = db.get(Document, doc_id)
     if doc is not None:
-        storage = Path(doc.storage_path)
         db.delete(doc)
         record_event(
             db, "document_deleted", actor_user_id=actor_user_id,
@@ -161,44 +217,7 @@ def complete_delete(db: DBSession, doc_id: UUID, *, actor_user_id=None) -> None:
             details={"scope": doc.scope, "checksum": doc.checksum},
         )
         db.flush()
-        if doc.storage_path:
-            # Working-tree safety rule (2026-11-05 incident), hardened by the
-            # security review (F1): code that deletes files may delete a
-            # SINGLE REGULAR FILE whose REAL path is inside the configured
-            # upload_dir — never a directory derived from DB values or
-            # settings defaults — and never a SYMLINK: if any component of
-            # the stored path (final name or an intermediate directory) is
-            # a symlink, the resolved real path differs from the plain
-            # absolute path and the unlink is refused. The per-document
-            # directory may remain (empty); pruning empty dirs is an
-            # operator action, not something DB-driven code does.
-            try:
-                real = Path(os.path.realpath(storage))
-                plain = Path(os.path.abspath(storage))
-                allowed_root = Path(get_settings().upload_dir).resolve()
-                if real != plain:
-                    logger.error(
-                        "complete_delete refusing symlinked storage path — "
-                        "resolves to %s",
-                        real.name,
-                    )
-                elif real.is_symlink() or storage.is_symlink():
-                    logger.error("complete_delete refusing symlink final component")
-                elif real.is_file() and allowed_root in real.parents:
-                    real.unlink(missing_ok=True)
-                else:
-                    logger.error(
-                        "complete_delete refusing to unlink — not a regular "
-                        "file under upload_dir %s",
-                        allowed_root,
-                    )
-            except OSError as exc:
-                # F4 hygiene: class only — the row's storage_path is in the
-                # DB if an operator needs the full picture
-                logger.error(
-                    "complete_delete could not remove the stored file: %s",
-                    type(exc).__name__,
-                )
+        remove_stored_file(doc.storage_path)
 
 
 def list_stuck_deletes(db: DBSession) -> list[Document]:

@@ -85,3 +85,11 @@ def get_current_user(
     db.commit()  # renewal persists even if the handler fails later
     request.state.session_row = row
     return user
+
+
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    """B6: admin-only surface — a plain user gets 403 (wrong role), an
+    anonymous caller 401 (get_current_user ran first)."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return user

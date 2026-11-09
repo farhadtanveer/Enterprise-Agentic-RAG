@@ -18,7 +18,7 @@ import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
 from app.core.config import get_settings
@@ -113,17 +113,29 @@ def revoke_session(db: DBSession, row: SessionRow) -> None:
 
 def revoke_user_sessions(db: DBSession, user_id, *, keep_id=None) -> int:
     """Revoke all live sessions of a user (password change / disable).
-    ``keep_id`` survives — the current session outlives a self-change."""
-    result = db.execute(
-        update(SessionRow)
-        .where(
+    ``keep_id`` survives — the current session outlives a self-change.
+
+    B6 bug fix (found by the admin-API tests): the old Core-``update``
+    form had TWO defects — (1) ``SessionRow.id != keep_id`` with
+    ``keep_id=None`` is ``id != NULL`` in SQL, which matches NO rows, so
+    password resets/disables silently revoked ZERO sessions; (2) the
+    Core UPDATE bypasses the unit of work (see tests relying on
+    savepoint-rollback semantics). ORM-style attribute changes keep the
+    rowcounts identical and make ``keep_id=None`` revoke everything."""
+    rows = db.execute(
+        select(SessionRow).where(
             SessionRow.user_id == user_id,
             SessionRow.revoked_at.is_(None),
-            SessionRow.id != keep_id,
         )
-        .values(revoked_at=utcnow())
-    )
-    return result.rowcount
+    ).scalars().all()
+    now = utcnow()
+    kept = 0
+    for row in rows:
+        if keep_id is not None and row.id == keep_id:
+            kept += 1
+            continue
+        row.revoked_at = now
+    return len(rows) - kept
 
 
 def renew_if_due(db: DBSession, row: SessionRow) -> bool:

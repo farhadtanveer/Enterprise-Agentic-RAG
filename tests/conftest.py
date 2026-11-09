@@ -1,6 +1,5 @@
 """Test bootstrap: force offline, keyless settings before any app import."""
 import os
-import tempfile
 
 # Env vars beat the project .env in pydantic-settings. Empty keys mean any
 # accidental real network call raises instead of reaching out.
@@ -16,8 +15,10 @@ os.environ["COOKIE_SECURE"] = "false"
 
 import pytest
 from pathlib import Path
-from sqlalchemy import event
-from sqlalchemy.orm import Session, SessionTransactionOrigin
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.core.db import Base
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 
@@ -51,34 +52,35 @@ def pg_engine():
 
 @pytest.fixture()
 def db_session(pg_engine):
-    """One test = one transaction, rolled back at the end (§A11).
+    """One test = one clean database (§A11): TRUNCATE all tables up front,
+    then run against REAL commits — production session semantics.
 
-    App code commits explicitly (§A8), so the session joins the external
-    transaction via a SAVEPOINT that is restarted after every commit —
-    commits appear real to the code but the outer transaction is never
-    ended, and the final rollback wipes everything the test wrote.
-    """
+    Why not the classic savepoint fixture: under SQLAlchemy 2.1.4 a
+    session.commit() can end the session's ROOT transaction; the next
+    autobegin then takes over the connection's real transaction, so a
+    later ``db.rollback()`` (4xx handlers roll back!) wiped the whole
+    outer transaction and everything committed before it. Found by the
+    B6 admin tests (a revoked-sessions sequence went invisibly empty).
+    Truncate-per-test is statement-type agnostic: Core ``update``/
+    ``delete`` (throttle, revoke, conversation delete) behave exactly as
+    in production. Isolation comes from the truncate, not from rollback."""
+    import app.models  # noqa: F401 — register every table on Base.metadata
+
     connection = pg_engine.connect()
-    outer = connection.begin()
+    tables = ", ".join(
+        f'"{t.name}"' for t in reversed(Base.metadata.sorted_tables)
+    )
+    connection.execute(text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE"))
+    # commit the truncate: without this it stays an open connection-level
+    # transaction that every session then JOINS — route-level rollback()
+    # would wipe the whole test's data (exactly what the B6 tests caught)
+    connection.commit()
     session = Session(bind=connection, expire_on_commit=False)
-    session.begin_nested()
-
-    @event.listens_for(session, "after_transaction_end")
-    def restart_savepoint(sess, transaction):  # pragma: no cover - plumbing
-        # SQLAlchemy 2.1: origin is public (the old _parent_nil attr is gone).
-        # Restart only real savepoints of a still-active session — never
-        # during close() teardown.
-        if (
-            transaction.origin is SessionTransactionOrigin.BEGIN_NESTED
-            and transaction.parent is not None
-            and sess.is_active
-        ):
-            sess.begin_nested()
 
     yield session
 
     session.close()
-    outer.rollback()
+    connection.rollback()  # discard any uncommitted leftovers
     connection.close()
 
 
@@ -86,28 +88,15 @@ def db_session(pg_engine):
 def joined_session_factory(db_session):
     """Factory for code that builds its own sessions (CLIs).
 
-    Returns sessions bound to the test connection so CLI runs land inside
-    the same rolled-back transaction; the savepoint listener is copied onto
-    each new session so its commit() doesn't end the outer transaction.
-    """
+    B6: plain sessions on the test connection — truncate-per-test makes the
+    old savepoint-join tricks unnecessary; CLI commits are real and the
+    next test's truncate wipes them."""
     from sqlalchemy.orm import Session as _Session
 
     connection = db_session.get_bind()
 
     def factory() -> Session:
-        s = _Session(bind=connection, expire_on_commit=False)
-        s.begin_nested()
-
-        @event.listens_for(s, "after_transaction_end")
-        def restart(sess, transaction):  # pragma: no cover - plumbing
-            if (
-                transaction.origin is SessionTransactionOrigin.BEGIN_NESTED
-                and transaction.parent is not None
-                and sess.is_active
-            ):
-                sess.begin_nested()
-
-        return s
+        return _Session(bind=connection, expire_on_commit=False)
 
     return factory
 

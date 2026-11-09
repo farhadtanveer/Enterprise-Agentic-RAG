@@ -55,13 +55,40 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   as conversation_deleted — split into IntegrityError/StaleDataError (409)
   vs DBAPIError (502, status db_error).
 
+## 2026-11-09 — PART 4: B6 admin surface (continued)
+
+- B6 commit (this one): app/api/admin.py (users create/list/patch/
+  reset-password/delete + purge-private-documents C4; documents org-only
+  metadata listing C4, org upload, delete-ANY C3), DELETE /api/me (auth),
+  require_admin dependency (403/401), last-admin guard on EVERY path incl.
+  self (409), forced-change gate probed over the LIVE route table (route
+  inventory extended consciously with the 9 admin routes), audit events
+  without content, §A9.1 vectors-first on every delete, C2 (org docs
+  survive user deletion; self-deletion audit row anonymized — the FK
+  cannot reference the deleted actor on INSERT).
+- TEST INFRASTRUCTURE FIX (found by B6, documented in conftest): the
+  savepoint-rollback fixture was unsafe under SQLAlchemy 2.1.4 — after
+  session.commit() the session's root transaction could end and the next
+  autobegin took over the connection's real transaction, so any later
+  db.rollback() (every 4xx handler!) wiped the whole outer transaction
+  (revoked-sessions went invisibly empty; B5's audit.db rows came from
+  the same class of surprise). db_session now TRUNCATEs all tables per
+  test and runs REAL commits — production semantics, statement-type
+  agnostic. joined_session_factory simplified accordingly.
+- TWO REAL BUGS the B6 tests caught in EXISTING code:
+  (1) revoke_user_sessions: `id != keep_id` with keep_id=None is
+  `id != NULL` in SQL — password resets/disables revoked ZERO sessions;
+  (2) login_throttle reset/clear used Core DELETE (same fixture poison);
+  both rewritten ORM-style, semantics preserved (tests pass).
+- What failed first: create/list 403 (shared cookie jar — per-identity
+  clients), FK violation on self-delete audit (actor must be NULL),
+  login limiter exhaustion (autouse fresh-limiter fixture), then the two
+  real bugs above.
+
 ## EXACT NEXT STEP
 
-**STOP — do not start B5 or B6.** Await Farhad's answers on §A14.11
-(DECISIONS #1–#10, especially #1 admin-sees-filenames and #2 share
-semantics). After decisions land: implement the groups phase per §A14 as
-new steps, each with tests first, PROGRESS.md updated per the CLAUDE.md
-rule. Standing reminders: B5 (audit writer, legacy chat stops writing
-content, guarded `query_audit` drop) and B6 (admin endpoints) come after,
-per §A12 order; review finding #4 (parser size bound + timeout) must land
-WITH personal uploads (§A14.10).
+Decisions #1–#10 and corrections C1–C8 have LANDED (f6b27cd,
+docs/tasks/phase-b5-b6.md). Part 1 + S1/S2/S3 + B5 + B6 are done (see the
+2026-11-09 entries). **EXACT NEXT STEP: scripts/verify/b5.sh + b6.sh live
+runs with raw evidence (≤3 real LLM calls total), then STOP — do NOT
+start G1.**

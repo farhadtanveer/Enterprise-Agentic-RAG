@@ -101,6 +101,7 @@ def test_inventory_snapshot_matches_reviewed_allowlist():
         ("POST", "/api/auth/logout"),
         ("POST", "/api/auth/password"),
         ("GET", "/api/me"),
+        ("DELETE", "/api/me"),  # B6
         ("GET", "/api/conversations"),
         ("POST", "/api/conversations"),
         ("GET", "/api/conversations/{conversation_id}"),
@@ -108,6 +109,16 @@ def test_inventory_snapshot_matches_reviewed_allowlist():
         ("DELETE", "/api/conversations/{conversation_id}"),
         ("GET", "/api/conversations/{conversation_id}/messages"),
         ("POST", "/api/conversations/{conversation_id}/messages"),
+        # B6 admin surface (reviewed addition; require_admin on all of them)
+        ("GET", "/api/admin/users"),
+        ("POST", "/api/admin/users"),
+        ("PATCH", "/api/admin/users/{user_id}"),
+        ("DELETE", "/api/admin/users/{user_id}"),
+        ("POST", "/api/admin/users/{user_id}/reset-password"),
+        ("POST", "/api/admin/users/{user_id}/purge-private-documents"),
+        ("GET", "/api/admin/documents"),
+        ("POST", "/api/admin/documents"),
+        ("DELETE", "/api/admin/documents/{document_id}"),
     }
 
 
