@@ -117,7 +117,8 @@ def _ingest_one(db, *, path: Path, scope: str, owner_id, source_label: str) -> s
     )
     dest_dir = Path(get_settings().upload_dir) / str(doc.id)
     dest, size, checksum = docs_service.save_upload_stream(
-        path.open("rb"), dest_dir=dest_dir, display_name=display_name
+        path.open("rb"), dest_dir=dest_dir,
+        storage_name=f"{doc.id}{path.suffix.lower()}",  # F1: server-generated
     )
     doc.storage_path = str(dest)
     doc.size_bytes = size

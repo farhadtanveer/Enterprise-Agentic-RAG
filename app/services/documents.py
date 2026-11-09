@@ -13,6 +13,7 @@ B6 wires the delete endpoints).
 """
 import hashlib
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -75,20 +76,44 @@ def mark_failed(db: DBSession, doc: Document, error_class: str) -> None:
     db.flush()
 
 
-def save_upload_stream(fileobj, *, dest_dir: Path, display_name: str) -> tuple[Path, int, str]:
-    """Stream the upload to ``dest_dir/<display_name>`` under the byte cap.
+class UploadRejected(Exception):
+    """Raised when the stored name or an existing path is unsafe (maps to 422)."""
+
+
+def save_upload_stream(fileobj, *, dest_dir: Path, storage_name: str) -> tuple[Path, int, str]:
+    """Stream the upload to ``dest_dir/<storage_name>`` under the byte cap.
+
+    F1: the stored name is SERVER-GENERATED (the route/CLI pass
+    ``f"{doc_id}{suffix}"``) — a client-supplied filename never becomes a
+    filesystem path component. ``storage_name`` must be a pure basename;
+    the destination must not already exist (exclusive create, so a
+    pre-planted symlink or file can never be written through).
 
     Enforces MAX_UPLOAD_MB while streaming (a lying Content-Length can't
     blow past it); removes the partial file on any failure. Returns
     (path, size_bytes, sha256 checksum).
     """
+    if (
+        not storage_name
+        or storage_name in (".", "..")
+        or "/" in storage_name
+        or "\\" in storage_name  # reject Windows separators on every OS
+        or "\x00" in storage_name
+        or os.sep in storage_name
+        or (os.altsep and os.altsep in storage_name)
+        or Path(storage_name).name != storage_name
+    ):
+        raise UploadRejected(f"storage_name must be a plain basename, got {storage_name!r}")
     max_bytes = get_settings().max_upload_mb * 1024 * 1024
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / display_name
+    dest = dest_dir / storage_name
+    if dest.is_symlink() or dest.exists():
+        # exclusive-create refuses a pre-planted file/symlink outright
+        raise UploadRejected(f"destination already exists: {dest.name}")
     digest = hashlib.sha256()
     size = 0
     try:
-        with dest.open("wb") as out:
+        with dest.open("xb") as out:
             while chunk := fileobj.read(1024 * 1024):
                 size += len(chunk)
                 if size > max_bytes:
@@ -128,22 +153,35 @@ def complete_delete(db: DBSession, doc_id: UUID, *, actor_user_id=None) -> None:
         )
         db.flush()
         if doc.storage_path:
-            # Working-tree safety rule (2026-11-05 incident): code that
-            # deletes files may delete a SINGLE FILE whose resolved path is
-            # inside the configured upload_dir — never a directory derived
-            # from DB values or settings defaults. The per-document
+            # Working-tree safety rule (2026-11-05 incident), hardened by the
+            # security review (F1): code that deletes files may delete a
+            # SINGLE REGULAR FILE whose REAL path is inside the configured
+            # upload_dir — never a directory derived from DB values or
+            # settings defaults — and never a SYMLINK: if any component of
+            # the stored path (final name or an intermediate directory) is
+            # a symlink, the resolved real path differs from the plain
+            # absolute path and the unlink is refused. The per-document
             # directory may remain (empty); pruning empty dirs is an
             # operator action, not something DB-driven code does.
             try:
-                target = storage.resolve()
+                real = Path(os.path.realpath(storage))
+                plain = Path(os.path.abspath(storage))
                 allowed_root = Path(get_settings().upload_dir).resolve()
-                if target.is_file() and allowed_root in target.parents:
-                    target.unlink(missing_ok=True)
+                if real != plain:
+                    logger.error(
+                        "complete_delete refusing symlinked storage path — "
+                        "resolves to %s",
+                        real.name,
+                    )
+                elif real.is_symlink() or storage.is_symlink():
+                    logger.error("complete_delete refusing symlink final component")
+                elif real.is_file() and allowed_root in real.parents:
+                    real.unlink(missing_ok=True)
                 else:
                     logger.error(
-                        "complete_delete refusing to unlink %s — not a file "
-                        "under upload_dir %s",
-                        target, allowed_root,
+                        "complete_delete refusing to unlink — not a regular "
+                        "file under upload_dir %s",
+                        allowed_root,
                     )
             except OSError:
                 logger.exception("complete_delete could not remove the stored file")

@@ -15,6 +15,7 @@ Findings encoded here:
   clause only catches OSError) and surfaces as an unhandled 500.
 Pins (expected-PASS) cover the behavior that is already correct.
 """
+import io
 import logging
 from contextlib import contextmanager
 
@@ -155,9 +156,11 @@ def test_complete_delete_refuses_traversal_and_unc_paths(
 
 
 def test_ingest_traversal_filename_is_sanitized(db_session, tmp_path, monkeypatch):
-    """Pin (correct today): Path(...).name strips directory components, so
-    "../../evil.txt" lands as evil.txt inside uploads/<doc_id>/ — nothing
-    is written outside the configured upload_dir."""
+    """Pin (correct today; F1 updated the STORED NAME): the client filename is
+    reduced to a basename, and since F1 the stored file uses a SERVER-
+    GENERATED name (<doc_id><suffix>) — the client string never becomes a
+    path component. "../../evil.txt" lands as uploads/<doc_id>/<doc_id>.txt;
+    nothing is written outside the configured upload_dir."""
     from app.api import routes as legacy_routes
 
     monkeypatch.setattr(legacy_routes.settings, "admin_api_key", ADMIN_KEY)
@@ -178,11 +181,64 @@ def test_ingest_traversal_filename_is_sanitized(db_session, tmp_path, monkeypatc
 
     assert r.status_code == 200, r.text
     doc_id = r.json()["document_id"]
-    stored = uploads / doc_id / "evil.txt"
-    assert stored.is_file()
+    stored = uploads / doc_id / f"{doc_id}.txt"
+    assert stored.is_file(), f"server-generated stored file missing: {stored}"
+    # the client-controlled name never appears on disk
+    assert not (uploads / doc_id / "evil.txt").exists()
     # nothing landed outside upload_dir
     assert not (tmp_path / "evil.txt").exists()
     assert not (tmp_path.parent / "evil.txt").exists()
+
+
+def test_complete_delete_refuses_symlinked_intermediate_directory(
+    db_session, tmp_path, monkeypatch
+):
+    """F1 companion to the final-component symlink hole: a symlinked
+    INTERMEDIATE directory inside the doc's own tree must also be refused —
+    uploads/doc-a/dirlink -> doc-b would otherwise let a delete of doc-a
+    remove doc-b's file while satisfying the containment check."""
+    monkeypatch.setattr(get_settings(), "upload_dir", str(tmp_path / "uploads"))
+    root = tmp_path / "uploads"
+
+    victim_dir = root / "doc-b"
+    victim_dir.mkdir(parents=True)
+    victim_file = victim_dir / "victim.txt"
+    victim_file.write_text("keep me")
+
+    attacker_dir = root / "doc-a"
+    attacker_dir.mkdir(parents=True)
+    dirlink = attacker_dir / "dirlink"
+    dirlink.symlink_to(victim_dir, target_is_directory=True)
+
+    doc = docs_service.create_document(
+        db_session, scope="org", owner_id=None, display_name="x.txt",
+        storage_path=str(dirlink / "victim.txt"),
+        checksum="d" * 64, size_bytes=1, mime_suffix=".txt",
+    )
+    db_session.commit()
+
+    docs_service.complete_delete(db_session, doc.id)
+    db_session.commit()
+
+    assert victim_file.exists(), (
+        "complete_delete followed a symlinked INTERMEDIATE directory and "
+        "deleted another document's file"
+    )
+
+
+def test_save_upload_stream_refuses_path_storage_names(tmp_path):
+    """F1: storage_name must be a pure basename — separators, '..' or
+    absolute paths are rejected before anything is written."""
+    import pytest as _pytest
+
+    from app.services.documents import UploadRejected, save_upload_stream
+
+    for bad in ("../escape.txt", "sub/dir.txt", "C:\\evil.txt", "", ".."):
+        with _pytest.raises(UploadRejected):
+            save_upload_stream(
+                io.BytesIO(b"x"), dest_dir=tmp_path / "d", storage_name=bad
+            )
+    assert not (tmp_path / "d").exists() or not any((tmp_path / "d").rglob("*"))
 
 
 def test_ingest_raw_nul_filename_is_client_error_not_500(db_session, tmp_path, monkeypatch):

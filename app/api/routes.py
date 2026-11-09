@@ -104,11 +104,14 @@ async def ingest(
     try:
         dest, size, checksum = documents_service.save_upload_stream(
             file.file, dest_dir=Path(settings.upload_dir) / str(doc.id),
-            display_name=display_name,
+            storage_name=f"{doc.id}{suffix}",  # F1: server-generated stored name
         )
     except documents_service.UploadTooLarge:
         db.rollback()  # the pending row dies with the request transaction
         raise HTTPException(status_code=413, detail="File exceeds MAX_UPLOAD_MB") from None
+    except documents_service.UploadRejected:
+        db.rollback()  # the pending row dies with the request transaction
+        raise HTTPException(status_code=422, detail="Invalid storage name") from None
     doc.storage_path = str(dest)
     doc.size_bytes = size
     doc.checksum = checksum
