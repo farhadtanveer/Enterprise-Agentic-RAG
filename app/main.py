@@ -15,7 +15,6 @@ from app.core.config import (
     validate_production_settings,
 )
 from app.core.logging import configure_logging
-from app.services.audit import init_db
 
 
 configure_logging()
@@ -23,9 +22,6 @@ settings = get_settings()
 validate_admin_key(settings)
 validate_chat_security(settings)
 validate_production_settings(settings)
-# Legacy SQLite query_audit init: stays until B5 stops legacy content writes
-# and the removal commit deletes the module (docs/backend-design.md §A12).
-init_db()
 
 
 def run_migrations_to_head() -> None:

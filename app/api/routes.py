@@ -17,7 +17,6 @@ from app.services.ingestion import (
     make_text_validator,
     SUPPORTED,
 )
-from app.services.audit import write_audit
 from app.services.audit_events import record_event
 from app.services.ratelimit import SlidingWindowLimiter
 from app.services.retrieval import ORG_ONLY_FILTER
@@ -57,14 +56,9 @@ def chat(payload: ChatRequest, request: Request, x_api_key: str = Header(default
         # org-only from B4 on (private chunks never match this filter).
         result = ask(payload.question, retrieval_filter=ORG_ONLY_FILTER)
         duration_ms = int((time.perf_counter() - started) * 1000)
-        write_audit(
-            payload.question,
-            result["source_used"],
-            result.get("trace", []),
-            client_ip=request.client.host if request.client else "unknown",
-            authenticated=bool(settings.chat_api_key),
-            duration_ms=duration_ms,
-        )
+        # B5 (C8): NO content audit anywhere — the legacy SQLite writer is
+        # removed; every chat is counted content-lessly in audit_events
+        # (chat_asked) on the session-auth path only.
 
         return {
             "answer": result["answer"],

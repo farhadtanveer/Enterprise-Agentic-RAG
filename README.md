@@ -161,11 +161,10 @@ The chat response includes the `answer`, which `source_used` produced it, the fu
 │   │   ├── workflow.py        # the LangGraph graph — nodes and routing
 │   │   └── vectorstore.py     # Pinecone index, embeddings, retriever
 │   └── services/
-│       ├── audit.py           # SQLite audit log (question, source, trace)
+│       ├── audit_events.py    # content-free audit events (counts, ids, durations)
 │       └── ingestion.py       # load + chunk PDF / TXT / MD / DOCX
 ├── data/
-│   ├── sample_kb/             # fictional sample docs (NovaRetail IT handbook)
-│   └── audit.db               # created on first run
+│   └── sample_kb/             # fictional sample docs (NovaRetail IT handbook)
 ├── templates/  static/        # chat UI (Jinja2 + vanilla JS)
 ├── ingest_sample_kb.py        # indexes data/sample_kb into Pinecone
 └── run.py                     # uvicorn entry point (port 8000, override with PORT)
@@ -174,7 +173,7 @@ The chat response includes the `answer`, which `source_used` produced it, the fu
 ## Things worth knowing
 
 - **Changing `EMBEDDING_MODEL`** to a model with a different dimension deletes and recreates the Pinecone index — your vectors go with it. Re-run ingestion afterward.
-- **Every question is audited.** `data/audit.db` (plain SQLite) stores the question, which source answered, and the full execution trace. Good for debugging and for showing your work.
+- **Chats are audited content-lessly.** Since B5, no question/trace text is stored anywhere outside your own conversation rows; `audit_events` records counts, durations and ids only. (The old SQLite `data/audit.db` writer was removed in B5.)
 - **The sample docs are fictional.** Swap in real company documents via the "+ Add Company Document" button or `POST /api/ingest`.
 - Chunking is `RecursiveCharacterTextSplitter` at 900 chars with 120 overlap — tweak it in `app/services/ingestion.py` if your docs need different treatment.
 

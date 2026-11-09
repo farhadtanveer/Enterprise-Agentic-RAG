@@ -33,6 +33,28 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   DECISIONS FOR FARHAD); D4/D6/D10/D11 rows amended; D6 web-fallback
   default flips to `false` (decided).
 
+## 2026-11-09 — Part 1 corrections + S1/S2/S3 + B5 (phase-b5-b6 task)
+
+- Part 1 design corrections: `f6b27cd` (§A14 v2 + A8/A12/A13 aligned).
+- S1 delete-during-send 409 conversation_deleted + chat_failed audit: `dee4e09`
+  (acceptance window test unchanged; two new exact-semantics tests).
+- S2 corrupt upload 422 generic / infra 500 boundary: `ac18d9e`.
+- S3 mutation re-test F1/F2/F6: `1aea641` + docs/review/s3-mutation-report.md
+  (6 mutants: 4 killed outright, M-B equivalent mutant documented, M-E killed
+  by the new pre-row 415 pin). Zero survivors.
+- B5 legacy audit writer REMOVED (C8): app/services/audit.py deleted,
+  write_audit/init_db/AUDIT_DB_PATH gone, tests/test_audit_log.py removed with
+  its subject, Semgrep suppressions removed with the file (both SAST gates
+  exit 0), README claims fixed. New pins: legacy chat/ingest create NO audit
+  db; mandated log-content test (DBAPIError with marker → absent from logs +
+  body). NOTE: data/audit.db still EXISTS on disk (4 rows, latest
+  2026-11-09T08:42Z — recreated by the verify-run app containers) — preserved
+  per instructions, never deleted.
+- What failed first during B5: the mandated DB-error marker test exposed that
+  the S1 handlers caught the PARENT DBAPIError and misreported any DB failure
+  as conversation_deleted — split into IntegrityError/StaleDataError (409)
+  vs DBAPIError (502, status db_error).
+
 ## EXACT NEXT STEP
 
 **STOP — do not start B5 or B6.** Await Farhad's answers on §A14.11

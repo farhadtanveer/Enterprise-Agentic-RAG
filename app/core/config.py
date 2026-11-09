@@ -32,7 +32,6 @@ class Settings(BaseSettings):
     admin_api_key: str = DEFAULT_ADMIN_KEY
     chat_api_key: str = ""
     chat_rate_limit_per_minute: int = 20
-    audit_db_path: str = str(BASE_DIR / "data" / "audit.db")
     upload_dir: str = str(BASE_DIR / "uploads")
     sample_kb_dir: str = str(BASE_DIR / "data" / "sample_kb")
 

@@ -11,7 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -265,6 +265,24 @@ def send_message(
             raise HTTPException(
                 status_code=409, detail={"code": "conversation_deleted"}
             ) from None
+        except DBAPIError:
+            # B5 marker test: any OTHER database failure (connection loss,
+            # constraint the cascade doesn't explain, ...) is NOT a deletion
+            # — do not misreport it as conversation_deleted. Roll back, count
+            # the failure in the audit (class-only details), and answer the
+            # standard 502. DBAPIError text can echo bound values, so it is
+            # never logged verbatim (the logger lines here are static).
+            db.rollback()
+            record_event(
+                db, "chat_failed", actor_user_id=user.id,
+                object_type="conversation", object_id=conversation_id,
+                outcome="error", route=SEND_ROUTE,
+                details={"status": "db_error"},
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=502, detail="The assistant failed to answer. You can retry."
+            ) from None
         raise HTTPException(
             status_code=502, detail="The assistant failed to answer. You can retry."
         ) from None
@@ -319,5 +337,19 @@ def send_message(
         db.commit()
         raise HTTPException(
             status_code=409, detail={"code": "conversation_deleted"}
+        ) from None
+    except DBAPIError:
+        # not a deletion — a generic database failure mid-TX2: answer 502,
+        # never misreport conversation_deleted, never leak driver text
+        db.rollback()
+        record_event(
+            db, "chat_failed", actor_user_id=user.id,
+            object_type="conversation", object_id=conversation_id,
+            outcome="error", route=SEND_ROUTE,
+            details={"status": "db_error"},
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=502, detail="The assistant failed to answer. You can retry."
         ) from None
     return conv_service.message_payload(assistant)

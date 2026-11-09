@@ -7,8 +7,7 @@ import tempfile
 os.environ["OPENAI_API_KEY"] = ""
 os.environ["TAVILY_API_KEY"] = ""
 os.environ["PINECONE_API_KEY"] = ""
-# Keep the real data/audit.db untouched by tests.
-os.environ["AUDIT_DB_PATH"] = os.path.join(tempfile.gettempdir(), "audit-test.db")
+# (B5/C8: the legacy audit writer is gone — nothing writes audit.db anymore.)
 # The test client speaks plain http to TestClient's http://testserver; the
 # cookie jar would refuse to SEND Secure cookies back over http, breaking
 # every session test. Cookie-flag VALUES are asserted from raw Set-Cookie
