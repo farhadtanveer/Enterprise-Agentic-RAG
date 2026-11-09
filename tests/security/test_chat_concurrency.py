@@ -203,3 +203,147 @@ def test_send_after_delete_completed_is_clean_404(prod_client_factory, monkeypat
         "want the clean ownership 404"
     )
     assert calls == [], "the graph must never run for a deleted conversation"
+
+
+def _assert_deleted_marker(conv_id, user_id, url):
+    """S1: exactly one chat_failed audit row for the vanished conversation,
+    attributed to the sender, with no content anywhere in the row."""
+    from sqlalchemy import select
+
+    from app.core.db import get_sessionmaker
+    from app.models.audit_event import AuditEvent
+
+    db = get_sessionmaker(url)()
+    try:
+        events = db.execute(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "chat_failed",
+                AuditEvent.object_id == conv_id,
+            )
+        ).scalars().all()
+        assert len(events) == 1, f"expected exactly 1 chat_failed event, got {len(events)}"
+        ev = events[0]
+        assert str(ev.actor_user_id) == str(user_id)
+        assert ev.outcome == "error"
+        dump = "|".join(
+            str(getattr(ev, c))
+            for c in ("event_type", "object_type", "outcome", "route")
+        ) + f"|{str(ev.details)}"
+        assert "delete me mid-flight" not in dump, "question text leaked into the audit row"
+    finally:
+        db.close()
+
+
+def test_delete_during_send_returns_409_conversation_deleted_with_audit(
+    prod_client_factory, monkeypatch
+):
+    """S1 (mandated semantics change): the send whose conversation is deleted
+    mid-graph answers 409 {"code": "conversation_deleted"} — not 502 — and
+    TX2 writes the chat_failed audit event (no FK on audit_events.object_id,
+    so the event survives the cascade). No answer text is persisted, no raw
+    500, and the audit row carries no question text."""
+    factory = prod_client_factory
+    username, conv_id = _make_user_and_conv(factory, "s1-deleter")
+    sid, csrf = _login(factory, username)
+    from app.core.db import get_sessionmaker
+    from app.models.user import User
+
+    db = get_sessionmaker(factory["test_url"])()
+    try:
+        user_id = db.execute(
+            select(User).where(User.username == username)
+        ).scalar_one().id
+    finally:
+        db.close()
+
+    started = threading.Event()
+    calls = []
+    monkeypatch.setattr(
+        conv_api, "ask", slow_ask(calls, started_event=started, delay=0.5)
+    )
+
+    sender = factory["client_for"](
+        cookie_token=sid, csrf=csrf, raise_server_exceptions=False
+    )
+    deleter = factory["client_for"](cookie_token=sid, csrf=csrf)
+
+    send_result = {}
+
+    def do_send():
+        send_result["resp"] = sender.post(
+            f"/api/conversations/{conv_id}/messages",
+            json={"question": "delete me mid-flight"},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    t = threading.Thread(target=do_send)
+    t.start()
+    assert started.wait(timeout=5), "graph never started"
+    r_del = deleter.delete(f"/api/conversations/{conv_id}", headers={"X-CSRF-Token": csrf})
+    assert r_del.status_code == 200, r_del.text
+    t.join(timeout=10)
+
+    r = send_result["resp"]
+    assert r.status_code == 409, f"want 409 conversation_deleted, got {r.status_code}: {r.text}"
+    assert r.json()["detail"] == {"code": "conversation_deleted"}, r.json()
+    # the graph DID run (the delete landed mid-flight); that nothing was
+    # persisted is proven by the FK error itself — the conversation and all
+    # its messages are gone
+    _assert_deleted_marker(conv_id, user_id, factory["test_url"])
+
+
+def test_delete_during_failing_graph_also_409_with_audit(
+    prod_client_factory, monkeypatch
+):
+    """S1, failure-path variant: the graph ALSO fails AND the conversation
+    is deleted mid-flight. TX2's error-marker insert fails the same way;
+    the response is still 409 conversation_deleted with the chat_failed
+    audit event — never 502, never a raw 500."""
+    factory = prod_client_factory
+    username, conv_id = _make_user_and_conv(factory, "s1-failer")
+    sid, csrf = _login(factory, username)
+    from app.core.db import get_sessionmaker
+    from app.models.user import User
+
+    db = get_sessionmaker(factory["test_url"])()
+    try:
+        user_id = db.execute(
+            select(User).where(User.username == username)
+        ).scalar_one().id
+    finally:
+        db.close()
+
+    started = threading.Event()
+
+    def failing_ask(question, retrieval_filter=None):
+        started.set()
+        time.sleep(0.5)
+        raise RuntimeError("graph exploded")
+
+    monkeypatch.setattr(conv_api, "ask", failing_ask)
+
+    sender = factory["client_for"](
+        cookie_token=sid, csrf=csrf, raise_server_exceptions=False
+    )
+    deleter = factory["client_for"](cookie_token=sid, csrf=csrf)
+
+    send_result = {}
+
+    def do_send():
+        send_result["resp"] = sender.post(
+            f"/api/conversations/{conv_id}/messages",
+            json={"question": "delete me mid-flight"},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    t = threading.Thread(target=do_send)
+    t.start()
+    assert started.wait(timeout=5), "graph never started"
+    r_del = deleter.delete(f"/api/conversations/{conv_id}", headers={"X-CSRF-Token": csrf})
+    assert r_del.status_code == 200, r_del.text
+    t.join(timeout=10)
+
+    r = send_result["resp"]
+    assert r.status_code == 409, f"want 409 conversation_deleted, got {r.status_code}: {r.text}"
+    assert r.json()["detail"] == {"code": "conversation_deleted"}, r.json()
+    _assert_deleted_marker(conv_id, user_id, factory["test_url"])

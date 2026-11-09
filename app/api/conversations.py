@@ -243,19 +243,27 @@ def send_message(
             )
             db.commit()
         except (IntegrityError, StaleDataError):
-            # F2 (review finding 2): the conversation was DELETED while the
-            # graph ran — messages follow via ON DELETE CASCADE, so neither
-            # the error-marker row nor the audit event has a parent to
-            # attach to. The flush can raise IntegrityError (orphan message
-            # INSERT) or StaleDataError (the conv.last_message_at UPDATE
-            # matched 0 rows — SQLAlchemy checks rowcounts on the flush).
-            # DELETE-WINS semantics (see below): discard the result, return
-            # the same clean 502 the graph-failure path uses — never a raw
-            # framework 500.
+            # S1 (supersedes F2's 502): the conversation was DELETED while
+            # the graph ran — messages follow via ON DELETE CASCADE, so the
+            # error-marker insert has no parent (IntegrityError) or the
+            # conv.last_message_at UPDATE matched 0 rows (StaleDataError).
+            # DELETE-WINS semantics: discard the result, answer
+            # 409 {"code": "conversation_deleted"}, and STILL write the
+            # chat_failed audit event (audit_events.object_id has no FK on
+            # purpose — it survives the cascade), attributed to the sender,
+            # with no content. Never a raw framework 500.
             db.rollback()
+            # conv is expired by the rollback (and its row is gone) — use
+            # the path parameter, never the ORM attribute, in this handler
+            record_event(
+                db, "chat_failed", actor_user_id=user.id,
+                object_type="conversation", object_id=conversation_id,
+                outcome="error", route=SEND_ROUTE,
+                details={"status": "conversation_deleted"},
+            )
+            db.commit()
             raise HTTPException(
-                status_code=502,
-                detail="The assistant failed to answer. You can retry.",
+                status_code=409, detail={"code": "conversation_deleted"}
             ) from None
         raise HTTPException(
             status_code=502, detail="The assistant failed to answer. You can retry."
@@ -264,17 +272,18 @@ def send_message(
     duration_ms = int((time.perf_counter() - started) * 1000)
     usage = result.get("token_usage") or {}
     # --- TX2 (success): answer + citations + trace + timings + tokens ------
-    # F2 delete-during-send semantics: the delete path takes no send lock and
-    # the user may legitimately delete a conversation at any moment (the
+    # F2/S1 delete-during-send semantics: the delete path takes no send lock
+    # and the user may legitimately delete a conversation at any moment (the
     # acceptance test pins DELETE == 200 even mid-send), so a delete CAN land
     # between TX1's commit and TX2 — the answer then has no parent row: the
     # conv.last_message_at UPDATE matches 0 rows (StaleDataError) and/or the
-    # assistant INSERT is an orphan (FK IntegrityError). We DISCARD the
-    # result (the conversation — and with it every message — is gone by the
-    # owner's explicit choice) and return a CLEAN 502 with the same static
-    # body the graph-failure path uses; a 404 would under-report (the send
-    # WAS accepted and the graph ran) and a retryable-looking 409 would
-    # point at a conversation that no longer exists. Never a raw 500.
+    # assistant INSERT is an orphan (FK IntegrityError). DELETE WINS: the
+    # conversation — and with it every message — is gone by the owner's
+    # explicit choice, so we DISCARD the result, write the chat_failed
+    # audit event (it survives the cascade; no content in it), and answer
+    # 409 {"code": "conversation_deleted"} — a distinct machine-readable
+    # code so the UI can say "conversation deleted" instead of a generic
+    # failure. Never a raw 500.
     try:
         assistant = conv_service.add_message(
             db, conv, "assistant", result["answer"],
@@ -299,7 +308,16 @@ def send_message(
     except (IntegrityError, StaleDataError):
         db.rollback()
         logger.error("conversation deleted while a chat answer was in flight")
+        # conv is expired by the rollback (and its row is gone) — use the
+        # path parameter, never the ORM attribute, in this handler
+        record_event(
+            db, "chat_failed", actor_user_id=user.id,
+            object_type="conversation", object_id=conversation_id,
+            outcome="error", route=SEND_ROUTE,
+            details={"status": "conversation_deleted"},
+        )
+        db.commit()
         raise HTTPException(
-            status_code=502, detail="The assistant failed to answer. You can retry."
+            status_code=409, detail={"code": "conversation_deleted"}
         ) from None
     return conv_service.message_payload(assistant)
