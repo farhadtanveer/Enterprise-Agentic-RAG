@@ -220,9 +220,22 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   across PART 0: ONE call (H1 legacy chat); embeddings ~10 (all small,
   disclosed per step).
 
+## 2026-11-12 — H4 follow-up: CI-caused fix (one more env-dependent test)
+
+- CI `test` job went red at 1d458fe while compose was green: CI has no
+  `.env`, so the amended default (fallback OFF) applied and
+  test_prompt_injection.py (web-path, no explicit flag) short-circuited.
+  Reproduced locally with `-e ENABLE_WEB_FALLBACK=false`. Fix: the M5
+  test opts in explicitly (declared contract change; fencing assertions
+  unchanged). Commit (this one).
+- Full suite now green in BOTH modes: CI-mode (-e ENABLE_WEB_FALLBACK=
+  false) **254 passed / 0 failed** AND compose-mode (.env opt-in true)
+  **254 passed / 0 failed**. Lesson recorded in evidence: after
+  env-default changes, run the FULL suite in CI-mode.
+
 ## EXACT NEXT STEP
 
-**PART 0 (H1–H6) COMPLETE — STOP and report to Farhad.** Do NOT start
-PART 1 (G1 access control): that waits for his explicit go after this
-report. PART 1 will begin with G1.1 (Alembic 0005 groups schema) per
-docs/tasks/g1.md.
+**PART 0 (H1–H6) COMPLETE + CI re-verified green — STOP and report to
+Farhad.** Do NOT start PART 1 (G1 access control): that waits for his
+explicit go after this report. PART 1 will begin with G1.1 (Alembic 0005
+groups schema) per docs/tasks/g1.md.

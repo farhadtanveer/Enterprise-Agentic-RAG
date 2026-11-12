@@ -1,11 +1,16 @@
 """M5: untrusted web content must reach the LLM inside explicit fences
 with data-not-instructions framing."""
 import app.rag.workflow as wf
+from app.core.config import get_settings
 from app.services.retrieval import ORG_ONLY_FILTER
 from test_graph_routing import _FakeLLM, _FakeRetriever, _FakeTavily
 
 
 def test_web_content_is_fenced_in_grade_and_generate_prompts(monkeypatch):
+    s = get_settings()
+    # CONTRACT CHANGE (H4): web fallback now defaults OFF (D6 amended) —
+    # this M5 fencing test exercises the web path, so opt in explicitly.
+    monkeypatch.setattr(s, "enable_web_fallback", True)
     fake_llm = _FakeLLM(route="kb", grades=("weak", "good"))
     monkeypatch.setattr(wf, "_llm", fake_llm)
     monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())

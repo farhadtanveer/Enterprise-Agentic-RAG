@@ -219,3 +219,27 @@ org, status=indexed, chunks=1) from F3-era live testing. Its vector was
 removed from rag-v2 during the 2026-11-12 junk cleanup, so the row is an
 orphan (indexed with 0 vectors). Left for the operator: delete it via
 `DELETE /api/admin/documents/{id}` (idempotent vectors-first) if unwanted.
+
+## H4 follow-up — CI caught one more implicitly env-dependent test (2026-11-12)
+
+**What failed first:** CI (`test` job) went red at `1d458fe` (H4) while
+the compose run was green. Root cause: the compose test container reads
+the bind-mounted `.env` (which sets `ENABLE_WEB_FALLBACK=true`), but CI
+runs without `.env` — so the amended default (false) applied there and
+`tests/test_prompt_injection.py::test_web_content_is_fenced_in_grade_
+and_generate_prompts` (KB-weak → web path, no explicit flag) short-
+circuited to insufficient. Reproduced locally with
+`docker compose --profile test run --rm -e ENABLE_WEB_FALLBACK=false test …`
+→ 1 failed / 230 passed (-x stop).
+
+**Fix:** that M5 test now opts in explicitly
+(`monkeypatch.setattr(s, "enable_web_fallback", True)` — same declared
+contract change as the routing tests; the fencing assertions themselves
+are unchanged). Process lesson recorded: after env-default changes, run
+the FULL suite in CI-mode, not only the touched files.
+
+| Check | Expected | Actual | Result |
+|---|---|---|---|
+| full suite, CI-mode (`ENABLE_WEB_FALLBACK=false`) | 0 fail | **254 passed / 0 failed** (66.0s) | PASS |
+| full suite, compose-mode (`.env` flag true) | 0 fail | **254 passed / 0 failed** (67.5s) | PASS |
+| CI on the fix commit | test green | (re-checked after push) | — |
