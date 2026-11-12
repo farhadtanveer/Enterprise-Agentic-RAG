@@ -85,10 +85,42 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   login limiter exhaustion (autouse fresh-limiter fixture), then the two
   real bugs above.
 
+## 2026-11-12 — B5 + B6 LIVE VERIFICATION (the mandated final step of phase-b5-b6)
+
+- Scripts first committed: `scripts/verify/b5.sh` (B5, disposable app
+  container + scratch db `rag_verify_b5`, loopback :8086) and
+  `scripts/verify/b6.sh` (B6, `rag_verify_b6`, :8087, Pinecone namespace
+  pinned to `multi-user-test`).
+- **b5.sh: PASS=11 FAIL=0 SKIP=0** (2026-11-12 06:53:41Z). Legacy writer
+  unimportable, AUDIT_DB_PATH setting gone, startup+chat+ingest write
+  nothing to data/audit.db (host-side sqlite check: 4 rows before AND
+  after, mtime unchanged — file preserved per C8), real legacy-chat marker
+  absent from trace AND logs, legacy ingest still 200. ONE real LLM call.
+- **b6.sh: PASS=33 FAIL=0 SKIP=0** (final run 06:57:57Z). ZERO real LLM
+  calls. All six CHECK groups green: forced-change gate, 401/403 authz
+  matrix, last-admin guard on every path incl. /api/me, disable/reset-
+  password, admin documents (org upload, metadata listing, delete-ANY,
+  vectors-first §A9.1, legacy namespace untouched 27=27), purge-private
+  403/200, /api/me 422/200 + login dead + anonymized audit row.
+- Script fix found by the first b6 run (30/1): "temp password logs in"
+  expected 200 but the app rightly refuses login on the still-DISABLED
+  account — reset-password (§A5) does not reactivate; enable is a separate
+  explicit PATCH. Script strengthened to pin 401-while-disabled → PATCH
+  is_active:true → 200 + must_change_password (a reset can never silently
+  un-suspend). No app change; permanent test already pins the right thing.
+- Pinecone hygiene: rag-v2 (default namespace) was holding 4 test-artifact
+  vectors (3× b5-note.txt from two 2026-11-09 b5.sh attempts + today, 1×
+  bad%00name.txt from F3 live testing — scratch DBs died, vectors
+  persisted). Deleted BY ID on 2026-11-12; rag-v2 now 0 (pristine for the
+  §A7 operator re-ingest), legacy namespace untouched (27).
+- Post-run cleanup verified: multi-user-test 0 vectors, no rag-verify-*
+  containers, no rag_verify_* databases.
+- Evidence (raw live records): docs/evidence/b5-evidence.md,
+  docs/evidence/b6-evidence.md (commit: this one).
+
 ## EXACT NEXT STEP
 
-Decisions #1–#10 and corrections C1–C8 have LANDED (f6b27cd,
-docs/tasks/phase-b5-b6.md). Part 1 + S1/S2/S3 + B5 + B6 are done (see the
-2026-11-09 entries). **EXACT NEXT STEP: scripts/verify/b5.sh + b6.sh live
-runs with raw evidence (≤3 real LLM calls total), then STOP — do NOT
-start G1.**
+Part 1 + S1/S2/S3 + B5 + B6 are done AND live-verified (2026-11-09 +
+2026-11-12 entries). **STOP — do NOT start G1.** Next action is outside
+the repo: present the B5/B6 live-verification summary to Farhad for
+review (evidence in docs/evidence/, mandate in docs/tasks/phase-b5-b6.md).
