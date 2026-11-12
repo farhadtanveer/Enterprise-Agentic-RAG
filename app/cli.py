@@ -104,7 +104,8 @@ def unlock(username: str) -> None:
 # --- B4 document ingestion (operator) ----------------------------------------
 
 
-def _ingest_one(db, *, path: Path, scope: str, owner_id, source_label: str) -> str:
+def _ingest_one(db, *, path: Path, scope: str, owner_id, source_label: str,
+                group_id=None, uploaded_by=None) -> str:
     from app.rag.vectorstore import add_documents
     from app.services import documents as docs_service
     from app.services.ingestion import (
@@ -134,7 +135,7 @@ def _ingest_one(db, *, path: Path, scope: str, owner_id, source_label: str) -> s
     doc = docs_service.create_document(
         db, scope=scope, owner_id=owner_id, display_name=display_name,
         storage_path="", checksum="", size_bytes=0,
-        mime_suffix=suffix or None,
+        mime_suffix=suffix or None, group_id=group_id, uploaded_by=uploaded_by,
     )
     dest_dir = Path(get_settings().upload_dir) / str(doc.id)
     try:
@@ -152,7 +153,7 @@ def _ingest_one(db, *, path: Path, scope: str, owner_id, source_label: str) -> s
     db.flush()
     chunks = chunk_documents(load_file(dest))
     add_documents(chunks, doc_id=doc.id, scope=scope, owner_id=owner_id,
-                  source_name=display_name)
+                  source_name=display_name, group_id=group_id)
     docs_service.attach_ingest_result(db, doc, len(chunks))
     record_event(
         db, "document_uploaded", object_type="document", object_id=doc.id,
@@ -192,6 +193,100 @@ def ingest_private(path: Path, owner: str) -> None:
             raise click.ClickException(f"No such user: {owner}")
         doc_id = _ingest_one(db, path=path, scope="private", owner_id=user.id, source_label="ingest-private")
         click.echo(f"indexed {path.name} → private document {doc_id} (owner {user.username})")
+    finally:
+        db.close()
+
+
+@cli.command("create-group")
+@click.argument("name")
+@click.option("--kind", type=click.Choice(["department", "project_team"]),
+              default="department", show_default=True)
+@click.option("--contact", default=None, help="Shown on insufficient-evidence answers (G2 surface).")
+def create_group(name: str, kind: str, contact: str | None) -> None:
+    """Create a department/project_team group (§A14.4 M1)."""
+    from app.services import groups as groups_svc
+
+    db = _session()
+    try:
+        group = groups_svc.create_group(db, name, kind=kind, contact=contact)
+        db.commit()
+        click.echo(f"Group '{group.name}' created (id {group.id}, kind {group.kind}).")
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+    finally:
+        db.close()
+
+
+def _active_group_or_fail(db, name: str):
+    from app.services import groups as groups_svc
+
+    group = groups_svc.get_active_by_name(db, name)
+    if group is None:
+        raise click.ClickException(f"No active group named '{name}'.")
+    return group
+
+
+@cli.command("add-member")
+@click.argument("group")
+@click.argument("username")
+@click.option("--role", type=click.Choice(["member", "editor"]),
+              default="member", show_default=True)
+def add_member(group: str, username: str, role: str) -> None:
+    """Add USERNAME to GROUP with a membership role (C1 — editor-ness lives
+    HERE, never on users.role)."""
+    from app.services import groups as groups_svc
+    from app.services import users as users_svc
+
+    db = _session()
+    try:
+        g = _active_group_or_fail(db, group)
+        user = users_svc.get_by_username(db, username)
+        if user is None:
+            raise click.ClickException(f"No such user: {username}")
+        m = groups_svc.add_member(db, g, user, role=role)
+        db.commit()
+        click.echo(f"{user.username} added to '{g.name}' as {m.role}.")
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+    finally:
+        db.close()
+
+
+@cli.command("remove-member")
+@click.argument("group")
+@click.argument("username")
+def remove_member(group: str, username: str) -> None:
+    """Remove USERNAME from GROUP (membership row deleted; audited)."""
+    from app.services import groups as groups_svc
+    from app.services import users as users_svc
+
+    db = _session()
+    try:
+        g = _active_group_or_fail(db, group)
+        user = users_svc.get_by_username(db, username)
+        if user is None:
+            raise click.ClickException(f"No such user: {username}")
+        groups_svc.remove_member(db, g, user)
+        db.commit()
+        click.echo(f"{user.username} removed from '{g.name}'.")
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+    finally:
+        db.close()
+
+
+@cli.command("ingest-group")
+@click.argument("group")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+def ingest_group(group: str, path: Path) -> None:
+    """Ingest one file as a GROUP document (§A14.4 M2): ownerless (C2),
+    group_id set, vectors carry the strictly prefixed group:<id> token."""
+    db = _session()
+    try:
+        g = _active_group_or_fail(db, group)
+        doc_id = _ingest_one(db, path=path, scope="group", owner_id=None,
+                             source_label="ingest-group", group_id=g.id)
+        click.echo(f"indexed {path.name} → group document {doc_id} (group {g.name})")
     finally:
         db.close()
 

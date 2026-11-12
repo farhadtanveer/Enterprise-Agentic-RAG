@@ -42,10 +42,14 @@ def create_document(
     size_bytes: int,
     mime_suffix: str | None,
     owner_id: UUID | None = None,
+    group_id: UUID | None = None,
+    uploaded_by: UUID | None = None,
 ) -> Document:
     doc = Document(
         scope=scope,
         owner_id=owner_id,
+        group_id=group_id,
+        uploaded_by=uploaded_by,
         display_name=display_name,
         storage_path=storage_path,
         checksum=checksum,

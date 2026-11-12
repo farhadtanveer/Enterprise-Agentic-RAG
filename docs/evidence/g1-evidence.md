@@ -91,3 +91,33 @@ prompts); admin no-implicit-access until an audited self-join.
 | resolver tests before implementation | red | collection error (no module) | RED (as designed) |
 | touched ACL/B4 tests after update | green | all green | PASS |
 | full offline suite | 0 fail | **279 passed / 0 failed** | PASS |
+
+## G1.3 — operator group CLIs (2026-11-12)
+
+Tests FIRST: tests/test_groups_cli.py (red before app/services/groups.py
+and the CLI commands existed — 6 failed on import/ClickException).
+
+**Delivered:**
+- app/services/groups.py (the seam G1.4's endpoints reuse): create/update/
+  delete_group, add/remove_member, set_member_role, get_active_by_name,
+  groups_for_user (ACTIVE only — mirrors the resolver), members_of. Every
+  change audits (group_created/group_updated/group_deleted/
+  membership_added/membership_removed/membership_role_changed) with
+  ids/roles only; actor_user_id None for CLI (operator), admin.id for API.
+  delete_group REFUSES while documents reference the group (mirrors the
+  FK RESTRICT with a human message; the DB constraint is the backstop).
+- app/cli.py: `create-group [--kind] [--contact]`, `add-member <group>
+  <user> --role member|editor`, `remove-member`, `ingest-group <group>
+  <file>` (ownerless group doc per C2; vectors carry the strictly
+  prefixed `group:<id>` token via the G1.2 add_documents signature).
+  _ingest_one grew group_id/uploaded_by pass-throughs.
+
+| Check | Expected | Actual | Result |
+|---|---|---|---|
+| group+CLI tests before implementation | red | 6 failed | RED (as designed) |
+| after implementation | all green | 6 passed | PASS |
+| full offline suite | 0 fail | **285 passed / 0 failed** | PASS |
+
+Two test-side fixes after the red→green pass (assertion mismatches, no
+assertion weakened): set_member_role takes role kw-only; the fake
+add_documents receives doc.id as UUID (str() both sides).

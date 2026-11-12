@@ -278,11 +278,26 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
 - Full offline suite: **279 passed / 0 failed**. Evidence:
   docs/evidence/g1-evidence.md (G1.2 section).
 
+## 2026-11-12 — G1.3 DONE (operator group CLIs + groups service)
+
+- Commit (this one): app/services/groups.py (create/update/delete_group —
+  delete refuses while documents reference the group; add/remove_member;
+  set_member_role; groups_for_user ACTIVE-only mirroring the resolver;
+  members_of; every change audited, ids/roles only, actor None for CLI)
+  + app/cli.py create-group / add-member --role / remove-member /
+  ingest-group <group> <file> (ownerless group doc per C2, vectors carry
+  the prefixed group:<id> token). create_document grew group_id/uploaded_by.
+- Tests FIRST: tests/test_groups_cli.py red (6 failed, no module) → green;
+  full offline suite **285 passed / 0 failed**. Evidence:
+  docs/evidence/g1-evidence.md (G1.3 section).
+
 ## EXACT NEXT STEP
 
-G1.3: operator CLIs — create-group, add-member <group> <user> --role,
-ingest-group <group> <file>, remove-member (app/cli.py, tests first,
-group-scope _ingest_one wiring the new add_documents signature). Then
-G1.4 admin groups endpoints + GET /api/me/groups + GET /api/groups/{id}/
-members + route inventory/forced-change extension → g1.sh live → mutation
-re-test. STOP after G1.
+G1.4: admin groups endpoints (CRUD + membership add/remove/change-role,
+audited; admin self-join visible to editors; delete RESTRICTed → 409;
+archive) + GET /api/me/groups (members) + GET /api/groups/{id}/members
+(editors of THAT group only; outsiders 404; member-non-editor 403).
+Extend the route inventory + forced-change gate tests CONSCIOUSLY. Tests
+first incl. the g1.md minimums: group routes 401/403/404 matrix; C2 user
+delete leaves group docs (endpoint level); group delete with docs → 409.
+Then g1.sh live → mutation re-test → STOP.
