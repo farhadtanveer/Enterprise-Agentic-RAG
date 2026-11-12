@@ -118,9 +118,16 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
 - Evidence (raw live records): docs/evidence/b5-evidence.md,
   docs/evidence/b6-evidence.md (commit: this one).
 
+## 2026-11-12 — G1 PART 0 started (task file committed; H1–H6 follow)
+
+- Farhad reviewed the B5/B6 summary and issued docs/tasks/g1.md (committed
+  in this commit). PART 0 = housekeeping H1–H6, one commit each, tests
+  first. PART 1 = G1 access control — NOT started until PART 0 is done and
+  reported.
+
 ## EXACT NEXT STEP
 
-Part 1 + S1/S2/S3 + B5 + B6 are done AND live-verified (2026-11-09 +
-2026-11-12 entries). **STOP — do NOT start G1.** Next action is outside
-the repo: present the B5/B6 live-verification summary to Farhad for
-review (evidence in docs/evidence/, mandate in docs/tasks/phase-b5-b6.md).
+Execute PART 0 H1 (b5.sh → PINECONE_NAMESPACE=multi-user-test + by-id
+trap cleanup + re-run + rag-v2-untouched proof), then H2→H6 in order (H6
+LAST — it populates rag-v2 and H1's untouched-proof must precede it).
+STOP after PART 0 and report. Do NOT start PART 1 (G1).
