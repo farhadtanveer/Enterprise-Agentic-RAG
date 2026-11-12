@@ -334,9 +334,25 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   skipped (16 conversations total across all runs, ~3 LLM API requests
   each). Evidence: docs/evidence/g1-evidence.md.
 
+## 2026-11-12 — G1 MUTATION RE-TEST DONE (10/10 killed, zero survivors) — **G1 COMPLETE**
+
+- Commit (this one): scripts/mutation/run-g1-mutations.sh (harness; final
+  run below) + docs/review/g1-mutation-report.md. Ten hand-written mutants
+  over the four mandated targets, all KILLED: audience (M-A1 archived-in-
+  audience, M-A2 self-token-drop, M-A3 org-token-drop), membership
+  (M-B1 can_read inverted, M-B2 member-as-editor, M-B3 any-member-matches),
+  last-admin lock (M-C1 FOR UPDATE removed → the exact 20/20 H3 red state;
+  M-C2 disabled-admins-count → B6 pins), group filter (M-D1 static
+  org-only, M-D2 chat-wiring regression). Baseline selection 76/0.
+- What failed first: the first harness execution called M-C1/M-C2
+  "survived" — a HARNESS bug (empty extra-test argument → the race suite
+  never ran for the lock mutants; the 42-test count exposed it). Fixed;
+  zero survivors in the final run.
+- Full offline suite stands at **296 passed / 0 failed** (both compose and
+  CI-mode); live verification 30/0/0 (see the previous entry).
+
 ## EXACT NEXT STEP
 
-Final G1 step: re-run MUTATION TESTING on the group audience computation,
-the membership check, the last-admin lock, and the group filter; report
-survivors. Then STOP — G1 done, wait for Farhad's review. Do NOT start
-G2.
+**G1 (docs/tasks/g1.md PART 1) COMPLETE — STOP and report to Farhad.**
+Wait for his review of G1 before ANY further work. Do NOT start G2
+(user-facing uploads, quotas, share flow, citations — his explicit rule).

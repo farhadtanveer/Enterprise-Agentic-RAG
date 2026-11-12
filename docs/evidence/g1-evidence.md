@@ -234,3 +234,21 @@ namespace; cleanup deleted 3 vectors by id; no containers/dbs left.
    run (3 documents) plus one per retrieval query per conversation.
    rag-v2/legacy namespaces untouched throughout; test-namespace vectors
    cleaned by id after every run.
+
+## G1 mutation re-test — 10/10 killed, zero survivors (2026-11-12)
+
+Harness: scripts/mutation/run-g1-mutations.sh (10 hand-written mutants,
+byte-identical restore asserted per mutant; baseline selection 76/0).
+Full table + survivor analysis: docs/review/g1-mutation-report.md.
+
+| Target (mandated) | Mutants | Result |
+|---|---|---|
+| group audience computation | M-A1 archived-in-audience, M-A2 self-token-drop, M-A3 org-token-drop | all KILLED |
+| membership check | M-B1 can_read inverted, M-B2 member-as-editor, M-B3 any-member-matches | all KILLED |
+| last-admin lock | M-C1 FOR UPDATE removed, M-C2 disabled-admins-count | all KILLED (C1 = the exact 20/20 H3 red state) |
+| group filter | M-D1 static org-only, M-D2 chat wiring regression | all KILLED |
+
+What failed first: the FIRST harness execution reported M-C1/M-C2 as
+survived — a harness bug (empty extra-test argument → the 20-test race
+suite never ran for the lock mutants; the 42-test count exposed it).
+Fixed; final run kills all ten.
