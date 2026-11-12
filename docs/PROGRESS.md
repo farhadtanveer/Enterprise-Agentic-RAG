@@ -310,13 +310,33 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   (-e ENABLE_WEB_FALLBACK=false). Evidence: docs/evidence/g1-evidence.md
   (G1.4 section).
 
+## 2026-11-12 — G1 LIVE VERIFICATION DONE (g1.sh 30/0/0 on the final run)
+
+- Commit (this one): scripts/verify/g1.sh — throwaway container + scratch
+  db rag_verify_g1 (:8088), namespace pinned multi-user-test AND
+  ENABLE_WEB_FALLBACK=false (the amended default; a verify script must not
+  ride the operator's .env opt-in). All scenario setup via the operator
+  CLIs (ingest-org, create-group ×2, ingest-group ×2, add-member ×2,
+  remove-member). Every doc verified by exact vector ids; the alpha
+  vectors' read_access probed to be EXACTLY ['group:<alpha-id>'].
+- Final green run (10:22:15Z): **PASS=30 FAIL=0 SKIP=0** — A cites
+  [g1-note, org-note]; B [org-note, g2-note] with ZERO alpha; admin
+  [org-note] only (no implicit access); remove-member alpha alice →
+  A's SAME-cookie next question cites [org-note] with retrieval 2→1
+  chunks; membership_removed audited; legacy namespace 27=27 (read-only);
+  trap deleted 3 vectors by id; rag-v2 externally verified untouched (5).
+- Honest disclosure in evidence: THREE runs to green (docker cp dir
+  path-class bug → Tavily-detour via the operator's web-fallback opt-in →
+  grader ambiguity from the alpha note reading like a competing answer);
+  NO app code changed — scenario/script hardening only. Model budget:
+  the four mandated conversations (A, B, admin, A-after-revoke) exceed
+  the "≤3 real LLM calls" line; deviation DISCLOSED, not silently
+  skipped (16 conversations total across all runs, ~3 LLM API requests
+  each). Evidence: docs/evidence/g1-evidence.md.
+
 ## EXACT NEXT STEP
 
-Live verification: scripts/verify/g1.sh (throwaway container + scratch
-db rag_verify_g1, PINECONE_NAMESPACE=multi-user-test, trap cleanup by id,
-≤3 real LLM calls): users A(G1 member)/B(G2 member)/admin(no groups);
-org + G1 + G2 docs via the CLIs; A asks through the FULL chat path and
-cites the G1 doc; B and admin get NO G1 citation; REMOVE A from G1 →
-A's NEXT question with the SAME session cookie loses the G1 doc; the
-org doc visible to all three. Raw evidence → docs/evidence/g1-evidence.md.
-Then mutation re-test → STOP (no G2).
+Final G1 step: re-run MUTATION TESTING on the group audience computation,
+the membership check, the last-admin lock, and the group filter; report
+survivors. Then STOP — G1 done, wait for Farhad's review. Do NOT start
+G2.

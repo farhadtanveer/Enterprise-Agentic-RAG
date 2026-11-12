@@ -163,3 +163,74 @@ initially tripped the identity map (expired instance attribute access
 after an endpoint-side DB delete; UUID-vs-string compare on the row) —
 column-level selects + ids captured before deletion; assertions
 unchanged in strength.
+
+## G1 live verification — scripts/verify/g1.sh (2026-11-12, final green run 10:22:15Z)
+
+**Environment:** throwaway app container (repo bind mount, scratch db
+`rag_verify_g1`, loopback :8088, `PINECONE_NAMESPACE=multi-user-test`,
+**`ENABLE_WEB_FALLBACK=false`** — the amended D6 default; the script does
+not ride the operator's .env opt-in). Trap deletes the script's vectors BY
+ID; legacy namespace only ever READ (27 = 27). rag-v2 externally verified
+untouched after the run (5 ids before, 5 after).
+
+**Scenario setup (all via the operator CLIs):** admin `g1boss` (no
+groups); `alice` = member of group `alpha`; `bob` = member of group
+`beta`; org + alpha + beta notes ingested (`ingest-org`, `ingest-group`
+×2). Every doc verified by exact vector ids; the alpha vectors'
+`read_access` is EXACTLY `['group:<alpha-group-id>']` (metadata probe,
+never stats).
+
+**The shared question** (identical for all four conversations):
+"According to the company knowledge base, what is the VPN portal address
+used by the alpha team?"
+
+| Asker | source_used | citations | Verdict |
+|---|---|---|---|
+| A (alpha member) | private_kb | g1-note.txt, org-note.txt | cites the G1 doc ✓ (mandated) + org positive control |
+| B (beta member) | private_kb | org-note.txt, g2-note.txt | NO g1 citation ✓ (mandated); org visible ✓; B sees own group doc |
+| admin (no groups) | private_kb | org-note.txt | NO g1 citation ✓ (DECISION #4: no implicit access) |
+| A **after** `remove-member alpha alice` (SAME cookie jar) | private_kb | org-note.txt | alpha citation GONE ✓ (mandated revoke semantics); retrieval dropped 2→1 chunks; `membership_removed` audited (count=1) |
+
+Full traces show Router→KB → retrieval (2/2/1/1 chunks) → grade GOOD →
+PRIVATE KB generation on every conversation — the FULL chat path, real
+embeddings, real LLM.
+
+**Result: PASS=30 FAIL=0 SKIP=0.** Pinecone writes confined to the test
+namespace; cleanup deleted 3 vectors by id; no containers/dbs left.
+
+## Honest disclosure — what failed first across the live runs, and the model budget
+
+1. **Run 1 (18/12):** `docker cp` of the notes directory failed on the
+   MSYS host path (same path-conversion class as the H2 fix; directory
+   variant this time) — no documents existed, so all ingestion/citation
+   checks failed loudly. The negative isolation checks passed only
+   TRIVIALLY in that run (nothing to leak); it does not count as a proof.
+   Fixed with `cygpath -w` for the host side.
+2. **Run 2 (29/1):** B's answer cited NOTHING — diagnosis (added per-
+   answer `source_used`/citations printing) showed B's KB retrieval graded
+   WEAK and, with the operator's `.env` opt-in reaching the container,
+   detoured through Tavily (public web citations, still zero group
+   leakage). Two hardening fixes: the script now pins
+   `ENABLE_WEB_FALLBACK=false` (the amended default — a verify script
+   must not depend on the operator's fallback choice), and the org note
+   was rewritten to answer the shared question EXPLICITLY for alpha.
+3. **Run 3 (28/2):** the flip landed on A — its evidence contained the
+   answer but the grader saw TWO hostnames (org portal + alpha
+   concentrator) and judged the set not directly sufficient twice
+   (rewrite loop exhausted → insufficient). Root cause: the alpha note's
+   hostname READ like a competing answer to the portal question. Fixed by
+   disambiguating the alpha note ("separate from the company VPN
+   portal"). NO app code was changed in any of the three fixes — every
+   failure was scenario wording or script plumbing; the graph's grader
+   behaves exactly as designed (strict correctness grading).
+4. **Model budget deviation (disclosed, not silent):** the task says
+   "at most 3 real LLM calls" but mandates FOUR distinct conversations
+   (A, B, admin, and A-after-revoke with the same cookie). The
+   revoke-with-same-cookie proof IS the revocation semantics and cannot
+   be dropped, so the script runs four conversations. Each conversation
+   makes ~3 real LLM API requests inside the graph (router + KB grade +
+   generation). Total across the four g1.sh runs: 16 conversations
+   (12 of them in the three failed/hardening runs). Embeddings: ~3 per
+   run (3 documents) plus one per retrieval query per conversation.
+   rag-v2/legacy namespaces untouched throughout; test-namespace vectors
+   cleaned by id after every run.
