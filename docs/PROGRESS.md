@@ -202,11 +202,27 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   since B5 (re-proven live 2026-11-12). **Farhad deletes it when he
   chooses — not deleted here.**
 
+## 2026-11-12 — G1 PART 0: H6 DONE (sample KB re-ingested into rag-v2) — **PART 0 COMPLETE**
+
+- Commit (this one): `docker compose exec app python -m app.cli ingest-org
+  /app/data/sample_kb` (operator action). company_it_handbook.md →
+  01a1cecd-6389… (3 chunks), service_desk_runbook.md → 01a1cecd-7f02…
+  (2 chunks). Verified by document listing + per-document EXACT vector
+  ids (list → fetch → doc_id match; NO stats): 3 + 2 ids enumerated in
+  docs/evidence/g1-part0-evidence.md, all scope=org / read_access=["org"],
+  zero foreign vectors in rag-v2, legacy namespace 27 ids (untouched).
+  Retrieval smoke with the org filter (1 real embedding, 0 LLM): VPN
+  question → 4 hits from both KB docs. ~6 embeddings spent, 0 LLM calls.
+- Orphan REPORTED (not mutated): dev-DB documents row bad%00name.txt
+  (01a1ac27-7635…, status=indexed, 0 vectors since the junk cleanup) —
+  operator may delete via the admin API.
+- rag-v2 pre-state 0 ids → now exactly the 5 KB vectors. Real-LLM spend
+  across PART 0: ONE call (H1 legacy chat); embeddings ~10 (all small,
+  disclosed per step).
+
 ## EXACT NEXT STEP
 
-PART 0 H6 (LAST): re-ingest data/sample_kb as ORG documents into rag-v2
-via `python -m app.cli ingest-org` (compose app or throwaway container —
-default namespace rag-v2, real embeddings), then verify by document
-listing + per-document EXACT vector ids (list → fetch → doc_id match),
-never stats; legacy namespace must stay 27. Then STOP PART 0 and report.
-Do NOT start PART 1 (G1).
+**PART 0 (H1–H6) COMPLETE — STOP and report to Farhad.** Do NOT start
+PART 1 (G1 access control): that waits for his explicit go after this
+report. PART 1 will begin with G1.1 (Alembic 0005 groups schema) per
+docs/tasks/g1.md.

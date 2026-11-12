@@ -171,3 +171,51 @@ after, mtime untouched, across chat + ingest + a fresh startup).
 
 **Farhad: the file is yours to delete when you choose.** Nothing in the
 app, tests, or scripts reads or writes it anymore (the B5 pins prove it).
+
+## H6 — sample KB re-ingested as ORG documents into rag-v2 (2026-11-12)
+
+**Operator action** (allowed to write rag-v2; not a test/script write):
+`docker compose exec app python -m app.cli ingest-org /app/data/sample_kb`
+
+```
+indexed company_it_handbook.md → org document 01a1cecd-6389-7aad-a0c2-60bae13f1358
+indexed service_desk_runbook.md → org document 01a1cecd-7f02-769f-bc46-731e3bdf1f80
+```
+
+Pre-state (list-based, no stats): rag-v2 = 0 vector ids, legacy
+`enterprise-agentic-rag` = 27 vector ids.
+
+**Documents listing** (documents table, dev `rag` DB):
+
+| display_name | id | scope | owner_id | chunks | status |
+|---|---|---|---|---|---|
+| company_it_handbook.md | 01a1cecd-6389-7aad-a0c2-60bae13f1358 | org | NULL | 3 | indexed |
+| service_desk_runbook.md | 01a1cecd-7f02-769f-bc46-731e3bdf1f80 | org | NULL | 2 | indexed |
+
+**Per-document EXACT vector ids** (list → fetch → metadata.doc_id match;
+no stats counters):
+
+- `company_it_handbook.md` — 3 vectors (== chunk_count):
+  `5defeddf2fd4d5766a00698b16fc89543ee04890dab452ae6f43e7909886c8df`,
+  `97d3f1e3ee0e011eeac8984e941f4d9da5440715c919d25202c84a1dc0203a00`,
+  `b172d4ee048449912355dc043a39fb03512ff8fc9e97dc9fb49512fe25e94172`
+- `service_desk_runbook.md` — 2 vectors (== chunk_count):
+  `17e7922a3f2fa09c01510503eabb9b8a6c5e0df2cd92e22b04b7225aadcf2f42`,
+  `a62345a197d765d7a36116b4e42041fd6c8619e723227766d568a27f4344b47d`
+
+Every vector carries `scope=org`, `read_access=["org"]`, correct source;
+**zero** vectors in rag-v2 belong to any other doc id. Legacy namespace
+untouched: 27 ids after (list-based count).
+
+**Retrieval smoke** (ONE real embedding call, no LLM): org-filtered
+retriever, question "How do I connect to the company VPN?" → 4 hits, top
+3 from company_it_handbook.md, 1 from service_desk_runbook.md — the app
+can answer KB questions again. Embeddings spent: ~6 (5 ingest + 1 query);
+LLM calls: 0.
+
+**Orphan row reported (not mutated):** the dev DB documents table still
+holds `bad%00name.txt` (id 01a1ac27-7635-71d3-ae3f-3c0ba280ab00, scope
+org, status=indexed, chunks=1) from F3-era live testing. Its vector was
+removed from rag-v2 during the 2026-11-12 junk cleanup, so the row is an
+orphan (indexed with 0 vectors). Left for the operator: delete it via
+`DELETE /api/admin/documents/{id}` (idempotent vectors-first) if unwanted.
