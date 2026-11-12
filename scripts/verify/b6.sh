@@ -5,8 +5,13 @@
 # Disposable by design: THROWAWAY app container + scratch database
 # (rag_verify_b6, loopback :8087). ALL Pinecone work happens in the
 # DEDICATED TEST NAMESPACE (multi-user-test); the legacy namespace is only
-# read via describe_index_stats before/after. The script deletes the test-
-# namespace data when it finishes. Real LLM calls: ZERO (B6 has no chat).
+# read via describe_index_stats before/after. Every document the script
+# creates is tracked and the cleanup trap deletes its vectors BY ID
+# (list -> fetch -> metadata match -> delete(ids=...), never delete_all,
+# never another namespace). Deletion proofs use EXACT vector ids — the
+# script fetches the concrete ids of each document and asserts those ids
+# are gone afterwards (never namespace stats).
+# Real LLM calls: ZERO (B6 has no chat).
 #
 # Re-run:  bash scripts/verify/b6.sh   (needs PINECONE key for the delete proofs)
 # =============================================================================
@@ -26,6 +31,7 @@ TMP=$(mktemp -d)
 PASS=0; FAIL=0; SKIPPED=0
 ADMIN_PW="Verify-Boss-Passphrase-B6"
 USER_PW="B6-User-Passphrase-7"
+DOCIDS=""   # every document id the script creates — trap cleans their vectors by id
 
 ck() { local d="$1" e="$2" a="$3"
   if [ -z "$e" ] || [ -z "$a" ]; then echo "FAIL  $d  (EMPTY expected/actual — upstream step failed)"; FAIL=$((FAIL+1)); return; fi
@@ -46,12 +52,60 @@ import json, sys
 print(json.loads(sys.stdin.read()).get('$1', ''))
 " 2>/dev/null; }
 
-cleanup() {
+# Exact vector ids of one document (space-separated) — list -> fetch ->
+# metadata match in the test namespace. Never stats counters.
+vec_ids_for() { # $1 = document id
   dc exec -i $APP python -c "
 from app.rag.vectorstore import ensure_index
-ensure_index().delete(delete_all=True, namespace='$NS')
-print('test namespace cleared')
-" >/dev/null 2>&1
+idx = ensure_index()
+ids = []
+for page in idx.list(namespace='$NS', limit=100):
+    ids.extend([v if isinstance(v, str) else v.id
+                for v in (page if isinstance(page, list) else page.vectors)])
+if ids:
+    fetched = idx.fetch(ids=ids, namespace='$NS').vectors
+    print(' '.join(i for i in ids if i in fetched
+                   and str((fetched[i].metadata or {}).get('doc_id')) == '$1'))
+" 2>/dev/null; }
+
+# How many of the given exact ids are STILL PRESENT (0 = all gone;
+# EMPTY guards against a false PASS when the upstream capture failed).
+absent_ids() { # $1 = space-separated vector ids
+  if [ -z "$(printf '%s' "$1" | tr -d ' ')" ]; then echo EMPTY; return; fi
+  dc exec -i $APP python -c "
+from app.rag.vectorstore import ensure_index
+idx = ensure_index()
+want = '$1'.split()
+got = idx.fetch(ids=want, namespace='$NS').vectors
+print(len([i for i in want if i in got]))
+" 2>/dev/null; }
+
+cleanup() {
+  # CLAUDE.md: clean up own vectors BY ID in a trap — tracked doc ids only,
+  # test namespace only, never delete_all, never another namespace.
+  dc exec -i $APP python -c "
+from app.rag.vectorstore import ensure_index
+idx = ensure_index()
+TRACKED = '''$DOCIDS'''.split()
+if not TRACKED:
+    print('cleanup: no documents were created — nothing to clean')
+else:
+    ids = []
+    for page in idx.list(namespace='$NS', limit=100):
+        ids.extend([v if isinstance(v, str) else v.id
+                    for v in (page if isinstance(page, list) else page.vectors)])
+    if not ids:
+        print('cleanup: namespace already empty')
+    else:
+        fetched = idx.fetch(ids=ids, namespace='$NS').vectors
+        ours = [i for i in ids if i in fetched
+                and str((fetched[i].metadata or {}).get('doc_id')) in TRACKED]
+        if ours:
+            idx.delete(ids=ours, namespace='$NS')
+            print('cleanup: deleted', len(ours), 'vectors by id')
+        else:
+            print('cleanup: no script-owned vectors found')
+" 2>/dev/null
   docker rm -f $APP >/dev/null 2>&1
   dc exec $DB dropdb -U rag --if-exists $DBV >/dev/null 2>&1
   rm -rf "$TMP"
@@ -170,16 +224,20 @@ RELOGIN=$(curl -s -X POST $BASE/api/auth/login \
   -d '{"username":"b6tempuser","password":"B6-Temp-Passphrase-2"}')
 ckc "temp password logs in after explicit re-enable" '"must_change_password":true' "$RELOGIN"
 
-# ===== 5. documents: org upload/list, delete-ANY, purge-private (C3/C4) ========
-note "CHECK 5: admin documents"
+# ===== 5. documents: org upload/list, delete-ANY by exact ids (C3) ============
+note "CHECK 5: admin documents (org upload, delete-ANY proved by exact vector ids)"
 printf 'B6 live verification note about VPN portals.\n' > "$TMP/note.txt"
 NOTEW=$(cygpath -w "$TMP/note.txt")
 UP=$(curl -s -b "$TMP/admin-jar" -X POST $BASE/api/admin/documents \
   -H "X-CSRF-Token: $ACSRF" -F "file=@$NOTEW;filename=b6-org-note.txt")
 ckc "org upload over admin session" '"document_id"' "$UP"
-DOCID=$(printf '%s' "$UP" | jsonget document_id)
+DOCID5=$(printf '%s' "$UP" | jsonget document_id)
+DOCIDS="$DOCIDS $DOCID5"
 LISTING=$(curl -s -b "$TMP/admin-jar" $BASE/api/admin/documents)
 ckc "org doc appears in the listing" "b6-org-note.txt" "$LISTING"
+VID5=$(vec_ids_for "$DOCID5")
+ck "org doc has exact vector ids before delete" ">=1" \
+  "$([ "$(printf '%s' "$VID5" | wc -w)" -ge 1 ] && echo ">=1" || echo 0)"
 STATS_BEFORE=$(dc exec -i $APP python -c "
 from app.rag.vectorstore import ensure_index
 import json
@@ -189,11 +247,12 @@ print(json.dumps({k: v.vector_count for k, v in ns.items()}, sort_keys=True))
 " 2>/dev/null)
 echo "      namespace stats before: $STATS_BEFORE"
 DELANY=$(curl -s -o /dev/null -w '%{http_code}' -b "$TMP/admin-jar" -X DELETE \
-  $BASE/api/admin/documents/$DOCID -H "X-CSRF-Token: $ACSRF")
+  $BASE/api/admin/documents/$DOCID5 -H "X-CSRF-Token: $ACSRF")
 ck "admin deletes ANY document (org) -> 200" "200" "$DELANY"
 DEL404=$(curl -s -o /dev/null -w '%{http_code}' -b "$TMP/admin-jar" -X DELETE \
   $BASE/api/admin/documents/00000000-0000-0000-0000-000000000000 -H "X-CSRF-Token: $ACSRF")
 ck "unknown document id -> 404" "404" "$DEL404"
+ck "org doc vectors deleted BY ID (exact ids absent)" "0" "$(absent_ids "$VID5")"
 STATS_AFTER=$(dc exec -i $APP python -c "
 from app.rag.vectorstore import ensure_index
 import json
@@ -201,14 +260,39 @@ s = ensure_index().describe_index_stats()
 ns = s.namespaces or {}
 print(json.dumps({k: v.vector_count for k, v in ns.items()}, sort_keys=True))
 " 2>/dev/null)
-ck "test-namespace vector count dropped to 0 after delete" "0" \
-  "$(printf '%s' "$STATS_AFTER" | grep -o "\"$NS\": [0-9]*" | grep -o '[0-9]*$' || echo 0)"
 LEGACY_STATS_BEFORE=$(printf '%s' "$STATS_BEFORE" | grep -o "\"$LEGACY_NS\": [0-9]*")
 LEGACY_STATS_AFTER=$(printf '%s' "$STATS_AFTER" | grep -o "\"$LEGACY_NS\": [0-9]*")
 ck "legacy namespace untouched" "$LEGACY_STATS_BEFORE" "$LEGACY_STATS_AFTER"
 
-# ===== 6. DELETE /api/me (plain user) =========================================
-note "CHECK 6: purge + self-delete (a fresh user — CHECK 4's is disabled by design)"
+# ===== 6. private documents: admin purge + self-delete, BY-ID proofs (C4/A9.1)
+note "CHECK 6: private docs — admin bulk-purge, then /api/me self-delete"
+
+# --- (a) admin bulk-purge of a user's REAL private document -------------------
+MADE_P=$(curl -s -b "$TMP/admin-jar" -X POST $BASE/api/admin/users \
+  -H "Content-Type: application/json" -H "X-CSRF-Token: $ACSRF" \
+  -d '{"username":"b6docowner","password":"B6-Doc-Passphrase-5"}')
+ckc "purge-target user created" '"must_change_password":true' "$MADE_P"
+DUID=$(printf '%s' "$MADE_P" | jsonget id)
+printf 'B6 purge-target private note about fleet vehicles.\n' > "$TMP/purge-note.txt"
+PURGE_NOTE_W=$(cygpath -w "$TMP/purge-note.txt")
+# host side must be a native Windows path (MSYS_NO_PATHCONV is for the container side)
+MSYS_NO_PATHCONV=1 docker cp "$PURGE_NOTE_W" "$APP:/tmp/b6-purge-note.txt" >/dev/null
+ING_P=$(dc exec -i $APP python -m app.cli ingest-private /tmp/b6-purge-note.txt \
+  --owner b6docowner 2>&1 | tail -1)
+ckc "ingest-private CLI indexed a REAL private doc" "private document" "$ING_P"
+DOCID_P=$(printf '%s' "$ING_P" | sed -E 's/.*private document ([0-9a-f-]{36}).*/\1/')
+DOCIDS="$DOCIDS $DOCID_P"
+VID_P=$(vec_ids_for "$DOCID_P")
+ck "purge-target private doc has exact vector ids" ">=1" \
+  "$([ "$(printf '%s' "$VID_P" | wc -w)" -ge 1 ] && echo ">=1" || echo 0)"
+APURGE=$(curl -s -b "$TMP/admin-jar" -o /dev/null -w '%{http_code}' -X POST \
+  "$BASE/api/admin/users/$DUID/purge-private-documents" -H "X-CSRF-Token: $ACSRF")
+ck "admin bulk-purge of that user's private docs -> 200" "200" "$APURGE"
+ck "purged doc vectors deleted BY ID (exact ids absent)" "0" "$(absent_ids "$VID_P")"
+ck "purged doc row gone" "0" \
+  "$(psql "SELECT count(*) FROM documents WHERE id='$DOCID_P'")"
+
+# --- (b) DELETE /api/me for a user owning a REAL private document -------------
 MADE=$(curl -s -b "$TMP/admin-jar" -X POST $BASE/api/admin/users \
   -H "Content-Type: application/json" -H "X-CSRF-Token: $ACSRF" \
   -d '{"username":"b6selfdel","password":"B6-Self-Passphrase-3"}')
@@ -222,18 +306,31 @@ SSRF=$(awk '/csrf/{print $NF}' "$SJAR" | tail -1)
 curl -s -b "$SJAR" -o /dev/null -X POST $BASE/api/auth/password \
   -H "Content-Type: application/json" -H "X-CSRF-Token: $SSRF" \
   -d '{"old_password":"B6-Self-Passphrase-3","new_password":"B6-Self-Passphrase-4"}'
+printf 'B6 self-delete user private note about VPN portals.\n' > "$TMP/self-note.txt"
+SELF_NOTE_W=$(cygpath -w "$TMP/self-note.txt")
+MSYS_NO_PATHCONV=1 docker cp "$SELF_NOTE_W" "$APP:/tmp/b6-self-note.txt" >/dev/null
+ING_S=$(dc exec -i $APP python -m app.cli ingest-private /tmp/b6-self-note.txt \
+  --owner b6selfdel 2>&1 | tail -1)
+ckc "self-delete user owns a REAL private doc" "private document" "$ING_S"
+DOCID_S=$(printf '%s' "$ING_S" | sed -E 's/.*private document ([0-9a-f-]{36}).*/\1/')
+DOCIDS="$DOCIDS $DOCID_S"
+VID_S=$(vec_ids_for "$DOCID_S")
+ck "self-delete user's private doc has exact vector ids" ">=1" \
+  "$([ "$(printf '%s' "$VID_S" | wc -w)" -ge 1 ] && echo ">=1" || echo 0)"
 PURGE=$(curl -s -b "$SJAR" -o /dev/null -w '%{http_code}' -X POST \
   "$BASE/api/admin/users/$SUID/purge-private-documents" -H "X-CSRF-Token: $SSRF")
 ck "purge-private-documents by plain user on self -> 403" "403" "$PURGE"
-APURGE=$(curl -s -b "$TMP/admin-jar" -o /dev/null -w '%{http_code}' -X POST \
-  "$BASE/api/admin/users/$SUID/purge-private-documents" -H "X-CSRF-Token: $ACSRF")
-ck "purge-private-documents as admin (0 docs) -> 200" "200" "$APURGE"
 NOC=$(curl -s -b "$SJAR" -o /dev/null -w '%{http_code}' -X DELETE $BASE/api/me \
   -H "X-CSRF-Token: $SSRF")
 ck "self-delete without confirm -> 422" "422" "$NOC"
 DELETED=$(curl -s -b "$SJAR" -o /dev/null -w '%{http_code}' -X DELETE \
   "$BASE/api/me?confirm=true" -H "X-CSRF-Token: $SSRF")
 ck "self-delete with confirm -> 200" "200" "$DELETED"
+ck "self-deleted user's private doc vectors deleted BY ID" "0" "$(absent_ids "$VID_S")"
+ck "self-deleted user's doc row gone" "0" \
+  "$(psql "SELECT count(*) FROM documents WHERE id='$DOCID_S'")"
+ck "self-deleted user row gone" "0" \
+  "$(psql "SELECT count(*) FROM users WHERE id='$SUID'")"
 RELOG2=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"b6selfdel","password":"B6-Self-Passphrase-4"}')

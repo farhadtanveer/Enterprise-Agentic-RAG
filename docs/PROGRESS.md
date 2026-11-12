@@ -139,11 +139,29 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   (trap cleaned), legacy namespace 27 unchanged. 1 real LLM call.
 - Evidence: docs/evidence/g1-part0-evidence.md (H1 section).
 
+## 2026-11-12 — G1 PART 0: H2 DONE (B6 private-doc live gaps closed)
+
+- Commit (this one): b6.sh now ingests a REAL private document per
+  scenario via the ingest-private CLI (test namespace; docker cp with a
+  native-Windows host path), proves deletion by EXACT vector ids
+  (list → fetch → doc_id match → fetch(ids=…) after → absent; never
+  stats), pins doc/user row removal, and its trap deletes tracked docs'
+  vectors BY ID (delete_all removed). CHECK 5's org delete-ANY proof
+  upgraded to exact ids too.
+- First run failed 8 checks, ONE root cause (script-side, reported by the
+  EMPTY guards): MSYS_NO_PATHCONV=1 docker cp broke the HOST path
+  (C:\tmp\... not found). Fix: cygpath -w for the host side. No app code.
+- Final run (07:41Z): **PASS=44 FAIL=0 SKIP=0** — admin bulk-purge of a
+  real private doc → exact ids absent + row gone; DELETE /api/me for a
+  user owning a real private doc → exact ids absent + doc/user rows gone
+  + anonymized audit. rag-v2 untouched (0), multi-user-test empty after
+  trap, legacy 27=27. ZERO LLM calls, 3 small embeddings.
+- Evidence: docs/evidence/g1-part0-evidence.md (H2 section).
+
 ## EXACT NEXT STEP
 
-PART 0 H2: extend b6.sh — real private document via ingest-private CLI
-(test namespace), then (a) admin bulk-purge of that user's private docs,
-(b) DELETE /api/me for a user owning a private doc; prove vectors-first
-deletion with EXACT vector-id checks (list → fetch → match ids → delete →
-fetch those ids again → absent), never namespace stats. Then H3 → H6 (H6
-LAST, it populates rag-v2). STOP after PART 0.
+PART 0 H3: last-admin guard race — concurrency test, two admins demote/
+disable each other simultaneously ×20, must never leave zero active
+admins; fix with row locking (SELECT … FOR UPDATE) if it fails. Tests
+first, report what failed first, full offline suite green. Then H4 → H6
+(H6 LAST, it populates rag-v2). STOP after PART 0.

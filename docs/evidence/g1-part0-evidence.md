@@ -33,3 +33,44 @@ AUDIT_DB_PATH setting gone, audit.db 4 rows before == after with mtime
 untouched, chat marker absent from trace + logs, legacy ingest 200).
 ONE real LLM call spent (the legacy chat); one embedding call for the
 ingest (disclosed).
+
+## H2 — B6 live gaps closed: private-document purge + self-delete (2026-11-12)
+
+**Gap being closed:** b6.sh previously exercised admin purge and
+`DELETE /api/me` only against users owning ZERO private documents, and
+proved vector deletion with namespace STATS counters. Now: a REAL private
+document per scenario via the `ingest-private` CLI (test namespace), and
+deletion proved by EXACT vector ids (list → fetch → metadata.doc_id match
+→ capture the concrete ids → after deletion `fetch(ids=...)` must return
+none of them). Never stats, per CLAUDE.md. The b6 cleanup trap was also
+upgraded from `delete_all` to by-id deletion of the script's tracked
+document ids (CLAUDE.md: "clean up their own vectors by id in a trap").
+
+**Command:** `bash scripts/verify/b6.sh` (final green run 2026-11-12 07:41:18Z)
+
+| Proof | Expected | Actual | Result |
+|---|---|---|---|
+| full script run | 0 FAIL | 44 PASS / 0 FAIL / 0 SKIP | PASS |
+| ingest-private CLI (purge target) | private doc indexed | `private document <uuid>` | PASS |
+| purge-target doc has exact vector ids | ≥1 | ≥1 | PASS |
+| admin bulk-purge → 200 | 200 | 200 | PASS |
+| purged doc's exact ids absent after purge | 0 present | 0 | PASS |
+| purged doc row gone | 0 rows | 0 | PASS |
+| self-delete user owns a real private doc | indexed | `private document <uuid>` | PASS |
+| `DELETE /api/me` no confirm → 422 / confirm → 200 | 422 / 200 | 422 / 200 | PASS |
+| self-deleted user's exact ids absent | 0 present | 0 | PASS |
+| self-deleted user's doc + user rows gone | 0 / 0 | 0 / 0 | PASS |
+| CHECK 5 org delete-ANY now proved by exact ids | 0 present | 0 | PASS |
+| legacy namespace untouched (read-only stats) | 27 = 27 | 27 = 27 | PASS |
+| trap cleanup (by id) | namespace empty | `cleanup: namespace already empty` | PASS |
+| rag-v2 ids after run | 0 (untouched) | 0 | PASS |
+
+**What failed first:** the first run failed 8 checks with ONE root cause —
+`MSYS_NO_PATHCONV=1 docker cp "$TMP/..."` also disabled path conversion for
+the HOST argument, so docker.exe looked for `C:\tmp\...` and found nothing;
+the CLI error text then flowed into the doc-id extraction and the SQL row
+checks (the script's EMPTY/`>=1` guards failed loudly instead of false-
+PASSING, as designed). Fix: host side passed as a native Windows path
+(`cygpath -w`), conversion disabled only for the container side. No app
+code involved. Real model usage: 3 small embedding calls (org + 2 private
+notes), ZERO LLM calls.
