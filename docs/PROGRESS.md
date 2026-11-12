@@ -192,9 +192,21 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
 - Full offline suite: **254 passed / 0 failed** (63.9s; 253 + 1).
 - Evidence: docs/evidence/g1-part0-evidence.md (H4 section).
 
+## 2026-11-12 — G1 PART 0: H5 DONE (data/audit.db reported, NOT deleted)
+
+- Report (also in docs/evidence/g1-part0-evidence.md): path
+  `C:\Users\mtanveer\Desktop\Work\PKM RAG\Enterprise-Agentic-RAG\data\audit.db`,
+  12,288 bytes, git-ignored, **4 rows** in query_audit, latest
+  2026-11-09T08:42Z (written by verify-run containers during the 2026-11-09
+  b-runs, i.e. BEFORE the B5 writer removal). Nothing reads or writes it
+  since B5 (re-proven live 2026-11-12). **Farhad deletes it when he
+  chooses — not deleted here.**
+
 ## EXACT NEXT STEP
 
-PART 0 H5: REPORT data/audit.db (path + row count) — Farhad will delete
-it himself; never delete it here. Then H6 LAST: re-ingest data/sample_kb
-as ORG documents into rag-v2 via ingest-org CLI, verify by document
-listing + per-document exact vector ids (no stats). STOP after PART 0.
+PART 0 H6 (LAST): re-ingest data/sample_kb as ORG documents into rag-v2
+via `python -m app.cli ingest-org` (compose app or throwaway container —
+default namespace rag-v2, real embeddings), then verify by document
+listing + per-document EXACT vector ids (list → fetch → doc_id match),
+never stats; legacy namespace must stay 27. Then STOP PART 0 and report.
+Do NOT start PART 1 (G1).

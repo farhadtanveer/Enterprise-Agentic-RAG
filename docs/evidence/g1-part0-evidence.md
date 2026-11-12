@@ -152,3 +152,22 @@ source_used=insufficient_evidence, retry_count=0, query never rewritten.
 |---|---|---|---|
 | settings + routing + workflow tests | 0 fail | 16 passed | PASS |
 | full offline suite | 0 fail | **254 passed / 0 failed** (63.9s) | PASS |
+
+## H5 — data/audit.db report for Farhad (2026-11-12) — REPORT ONLY, never deleted here
+
+| Field | Value |
+|---|---|
+| Absolute path | `C:\Users\mtanveer\Desktop\Work\PKM RAG\Enterprise-Agentic-RAG\data\audit.db` |
+| Size | 12,288 bytes |
+| Git status | ignored (never tracked; commit 4302258 "Document setup and ignore runtime artifacts") |
+| Rows in `query_audit` | **4** |
+| Latest row | `created_at = 2026-11-09T08:42:11.331175+00:00` |
+
+Provenance: the file is a relic of the legacy audit writer (removed in B5,
+commit 797c494). Its 4 rows were written by verify-run app containers
+during the 2026-11-09 b-runs, before the writer was removed. Since B5
+nothing writes it — re-proven live on 2026-11-12 (b5.sh: 4 rows before ==
+after, mtime untouched, across chat + ingest + a fresh startup).
+
+**Farhad: the file is yours to delete when you choose.** Nothing in the
+app, tests, or scripts reads or writes it anymore (the B5 pins prove it).
