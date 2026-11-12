@@ -10,6 +10,12 @@
 # data/audit.db is preserved — its row count is recorded before and after
 # and must be IDENTICAL (C8: never delete; report only).
 #
+# Pinecone (CLAUDE.md): ALL app-side writes go to the dedicated namespace
+# multi-user-test (PINECONE_NAMESPACE on the throwaway container); the
+# cleanup trap deletes the script's vectors BY ID (this run's document_id
+# plus any prior crashed run's b5-note.txt leftovers) before removing the
+# container. rag-v2 and enterprise-agentic-rag are never written.
+#
 # Re-run:  bash scripts/verify/b5.sh   (needs OPENAI + PINECONE keys in .env)
 # =============================================================================
 set -u
@@ -20,6 +26,7 @@ NET=enterprise-agentic-rag_default
 DB=enterprise-agentic-rag-db-1
 APP=rag-verify-b5
 DBV=rag_verify_b5
+NS=multi-user-test
 PORT=8086
 BASE=http://127.0.0.1:$PORT
 TMP=$(mktemp -d)
@@ -47,7 +54,32 @@ p = '/app/data/audit.db'
 print(sqlite3.connect(p).execute('select count(*) from query_audit').fetchone()[0] if os.path.exists(p) else 'NOFILE')
 " 2>/dev/null; }
 
+DOCID=""
+
 cleanup() {
+  # CLAUDE.md: clean up own vectors BY ID in a trap, test namespace only.
+  # Runs while the throwaway container still exists (it has the keys).
+  if [ -n "$DOCID" ]; then
+    dc exec -i $APP python -c "
+from app.rag.vectorstore import ensure_index
+idx = ensure_index()
+ids = []
+for page in idx.list(namespace='$NS', limit=100):
+    ids.extend([v if isinstance(v, str) else v.id
+                for v in (page if isinstance(page, list) else page.vectors)])
+if not ids:
+    print('cleanup: test namespace already empty')
+else:
+    fetched = idx.fetch(ids=ids, namespace='$NS').vectors
+    ours = [i for i in ids if i in fetched and ((fetched[i].metadata or {}).get('doc_id') == '$DOCID'
+            or (fetched[i].metadata or {}).get('source') == 'b5-note.txt')]
+    if ours:
+        idx.delete(ids=ours, namespace='$NS')
+        print('cleanup: deleted', len(ours), 'vectors by id')
+    else:
+        print('cleanup: no script-owned vectors found')
+" 2>/dev/null
+  fi
   docker rm -f $APP >/dev/null 2>&1
   dc exec $DB dropdb -U rag --if-exists $DBV >/dev/null 2>&1
   rm -rf "$TMP"
@@ -73,6 +105,7 @@ dc run -d --name $APP --network $NET -p 127.0.0.1:$PORT:8080 \
   -e DATABASE_URL="postgresql+psycopg://rag:rag@db:5432/$DBV" \
   -e RUN_MIGRATIONS_ON_STARTUP=true -e COOKIE_SECURE=false -e APP_ENV=development \
   -e ADMIN_API_KEY=verify-admin-key -e LOGIN_RATE_LIMIT_PER_MINUTE=1000 \
+  -e PINECONE_NAMESPACE=$NS \
   enterprise-agentic-rag-app:latest \
   uvicorn app.main:app --host 0.0.0.0 --port 8080 >/dev/null
 for i in $(seq 1 60); do
@@ -121,17 +154,26 @@ ROWS_AFTER=$(audit_rows)
 ck "data/audit.db row count UNCHANGED after chat" "$ROWS_BEFORE" "$ROWS_AFTER"
 
 # ===== 4. legacy ingest writes no audit text ===================================
-note "CHECK 4: legacy ingest leaves no audit db write"
+note "CHECK 4: legacy ingest leaves no audit db write (test namespace only)"
 printf 'B5 verifier note about VPN portals.\n' > "$TMP/note.txt"
 NOTEW=$(cygpath -w "$TMP/note.txt")
-ING=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 -X POST $BASE/api/ingest \
+ING_RAW=$(curl -s --max-time 120 -w '\n%{http_code}' -X POST $BASE/api/ingest \
   -H "X-Admin-Key: verify-admin-key" -F "file=@$NOTEW;filename=b5-note.txt")
+ING=$(printf '%s' "$ING_RAW" | tail -1)
+ING_BODY=$(printf '%s' "$ING_RAW" | head -n -1)
 ck "legacy ingest succeeded" "200" "$ING"
+DOCID=$(printf '%s' "$ING_BODY" | dc exec -i $APP python -c "
+import json, sys
+print(json.loads(sys.stdin.read()).get('document_id', ''))
+" 2>/dev/null)
+ck "ingest returned document_id for the by-id trap cleanup" "uuid" \
+  "$([ ${#DOCID} -eq 36 ] && echo uuid || echo "len=${#DOCID}")"
 ROWS_FINAL=$(audit_rows)
 ck "data/audit.db row count STILL unchanged after ingest" "$ROWS_BEFORE" "$ROWS_FINAL"
 
 echo "=============================================================="
 echo "RESULT: PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED  ($(date -u '+%Y-%m-%d %H:%M:%SZ'))"
 echo "NOTE: host data/audit.db preserved ($ROWS_FINAL rows) — report, never delete."
+echo "NOTE: Pinecone writes were confined to namespace $NS; the trap deletes the script's vectors by id."
 echo "=============================================================="
 [ "$FAIL" -eq 0 ]

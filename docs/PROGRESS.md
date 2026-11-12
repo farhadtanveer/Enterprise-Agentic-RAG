@@ -125,9 +125,25 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   first. PART 1 = G1 access control — NOT started until PART 0 is done and
   reported.
 
+## 2026-11-12 — G1 PART 0: H1 DONE (b5.sh namespace violation fixed)
+
+- Commit (this one): scripts/verify/b5.sh now pins
+  `PINECONE_NAMESPACE=multi-user-test` on the throwaway container and its
+  cleanup trap deletes the script's vectors BY ID (this run's document_id
+  + prior crashed runs' b5-note.txt leftovers; list → fetch → metadata
+  match → delete(ids=…), never delete_all) BEFORE removing the container.
+  Ingest response now parsed for document_id (new PASS pin).
+- Live re-run (07:31Z): **PASS=12 FAIL=0 SKIP=0**; trap printed
+  `cleanup: deleted 1 vectors by id`. External read-only probe:
+  rag-v2 ids 0 before → 0 after (UNTOUCHED), multi-user-test 0 after
+  (trap cleaned), legacy namespace 27 unchanged. 1 real LLM call.
+- Evidence: docs/evidence/g1-part0-evidence.md (H1 section).
+
 ## EXACT NEXT STEP
 
-Execute PART 0 H1 (b5.sh → PINECONE_NAMESPACE=multi-user-test + by-id
-trap cleanup + re-run + rag-v2-untouched proof), then H2→H6 in order (H6
-LAST — it populates rag-v2 and H1's untouched-proof must precede it).
-STOP after PART 0 and report. Do NOT start PART 1 (G1).
+PART 0 H2: extend b6.sh — real private document via ingest-private CLI
+(test namespace), then (a) admin bulk-purge of that user's private docs,
+(b) DELETE /api/me for a user owning a private doc; prove vectors-first
+deletion with EXACT vector-id checks (list → fetch → match ids → delete →
+fetch those ids again → absent), never namespace stats. Then H3 → H6 (H6
+LAST, it populates rag-v2). STOP after PART 0.
