@@ -158,10 +158,27 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   trap, legacy 27=27. ZERO LLM calls, 3 small embeddings.
 - Evidence: docs/evidence/g1-part0-evidence.md (H2 section).
 
+## 2026-11-12 — G1 PART 0: H3 DONE (last-admin guard race fixed with row locking)
+
+- Commit (this one): tests/security/test_last_admin_race.py (20 attempts:
+  two barrier-synced admins demote or disable EACH OTHER, fresh per-
+  request DB sessions on the test engine, semantics-free widened guard
+  window, alternating demote/disable) + the fix: active_admin_count now
+  selects active-admin ids FOR UPDATE and counts in Python (an aggregate
+  can't take row locks).
+- What failed first (test before fix, as mandated): **20/20 attempts RED
+  against the unlocked COUNT** — both racing requests answered 200 and
+  the result was ZERO active admins (codes=[200, 200], both role=user).
+  After the fix: 20/20 green — the second guard blocks until the first
+  commit, re-reads, answers 409.
+- Full offline suite: **253 passed / 0 failed** (67.5s, compose test
+  profile; was 233 before H3 — grew exactly by the 20 race tests).
+- Evidence: docs/evidence/g1-part0-evidence.md (H3 section incl. the
+  exact red assertion and the reproduce-red recipe).
+
 ## EXACT NEXT STEP
 
-PART 0 H3: last-admin guard race — concurrency test, two admins demote/
-disable each other simultaneously ×20, must never leave zero active
-admins; fix with row locking (SELECT … FOR UPDATE) if it fails. Tests
-first, report what failed first, full offline suite green. Then H4 → H6
-(H6 LAST, it populates rag-v2). STOP after PART 0.
+PART 0 H4: pin ENABLE_WEB_FALLBACK default = false (A14/D6) with a test.
+Then H5 (report data/audit.db), then H6 LAST (re-ingest sample KB into
+rag-v2, verify by document listing + per-document vector ids). STOP after
+PART 0 and report. Do NOT start PART 1 (G1).

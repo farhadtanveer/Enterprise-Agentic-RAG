@@ -74,3 +74,45 @@ PASSING, as designed). Fix: host side passed as a native Windows path
 (`cygpath -w`), conversion disabled only for the container side. No app
 code involved. Real model usage: 3 small embedding calls (org + 2 private
 notes), ZERO LLM calls.
+
+## H3 — last-admin guard race: test first, then row locking (2026-11-12)
+
+**Bug being closed:** `active_admin_count` was an unlocked aggregate
+COUNT. Two admins demoting/disabling each other at the same moment both
+observed count=2 inside the guard window (count → mutate → commit), both
+proceeded, and the result was ZERO active admins — the exact state the
+§A5 guard exists to prevent.
+
+**What failed first (the test, before any fix):**
+`tests/security/test_last_admin_race.py` — two barrier-synchronized
+requests per attempt, each with its OWN DB session/transaction (the test
+overrides get_db with a fresh-per-request session on the test engine; the
+guard window is widened by a semantics-free sleep inside
+active_admin_count so the race is deterministic, not luck-based),
+alternating demote/disable, 20 attempts:
+
+```
+20 failed, 2 warnings in 15.92s
+AssertionError: attempt 0: neither racing request was refused —
+codes=[200, 200] bodies=('...role":"user"...race0b...', '...role":"user"...race0a...')
+```
+
+Both racing requests answered 200 — both admins demoted, zero active
+admins left. 20/20 attempts red.
+
+**The fix** (app/services/users.py): `active_admin_count` now selects the
+active-admin ids `FOR UPDATE` and counts in Python (FOR UPDATE cannot
+ride on an aggregate). The second racing guard blocks until the first
+transaction commits, re-reads the post-update state, and answers 409.
+Deadlock-free: both transactions lock the admin set in one statement
+(consistent scan order).
+
+| Check | Expected | Actual | Result |
+|---|---|---|---|
+| race test, UNFIXED guard | fails every attempt | 20 failed / 0 passed | RED (as designed) |
+| race test, FOR UPDATE fix | 20/20 green | 20 passed | PASS |
+| full offline suite | 0 failed | **253 passed / 0 failed** (67.5s) | PASS |
+
+**How to reproduce the red state:** revert app/services/users.py to the
+COUNT aggregate and run
+`docker compose --profile test run --rm test python -m pytest tests/security/test_last_admin_race.py -q`.

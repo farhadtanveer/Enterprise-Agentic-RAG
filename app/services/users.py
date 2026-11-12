@@ -41,12 +41,24 @@ def has_any_admin(db: DBSession) -> bool:
 
 
 def active_admin_count(db: DBSession) -> int:
-    """users WHERE role='admin' AND is_active — the last-admin gauge (§A5)."""
-    return db.execute(
-        select(func.count())
-        .select_from(User)
-        .where(User.role == "admin", User.is_active.is_(True))
-    ).scalar_one()
+    """users WHERE role='admin' AND is_active — the last-admin gauge (§A5).
+
+    The rows are locked FOR UPDATE (H3, docs/tasks/g1.md PART 0): two
+    admins demoting/disabling each other at the same moment must not both
+    observe count=2 and both proceed to zero active admins. The second
+    guard blocks until the first transaction commits, re-reads the
+    post-update state, and answers 409. FOR UPDATE cannot ride on an
+    aggregate, so the ids are selected and counted in Python. Proven by
+    tests/security/test_last_admin_race.py (20/20 red before, 20/20 green
+    after).
+    """
+    return len(
+        db.execute(
+            select(User.id)
+            .where(User.role == "admin", User.is_active.is_(True))
+            .with_for_update()
+        ).scalars().all()
+    )
 
 
 def would_leave_zero_admins(db: DBSession, user: User) -> bool:
