@@ -11,6 +11,7 @@ from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.message_feedback import MessageFeedback
 from app.models.document import Document
+from app.models.group import Group, GroupMembership
 
 __all__ = [
     "User",
@@ -21,4 +22,6 @@ __all__ = [
     "Message",
     "MessageFeedback",
     "Document",
+    "Group",
+    "GroupMembership",
 ]

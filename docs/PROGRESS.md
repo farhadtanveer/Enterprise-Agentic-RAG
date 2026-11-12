@@ -233,9 +233,33 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   **254 passed / 0 failed**. Lesson recorded in evidence: after
   env-default changes, run the FULL suite in CI-mode.
 
+## 2026-11-12 — G1 PART 1 started (Farhad's go received): G1.1 DONE
+
+- Commit (this one): Alembic 0005 — groups (name unique among ACTIVE via
+  partial unique index, kind CHECK department|project_team, contact,
+  is_active) + group_memberships (composite PK, both FKs CASCADE, role
+  CHECK member|editor per C1, added_by SET NULL, added_at) + documents
+  (scope CHECK org|group|private; group_id FK ON DELETE RESTRICT;
+  uploaded_by FK ON DELETE SET NULL backfilled from owner_id;
+  ck_documents_scope_owner_group enforcing D16/C2 shapes; dedupe unique
+  extended with group_id). users.role untouched (DB rejects group_editor).
+- Tests FIRST: tests/test_groups_schema.py — red before (module absent),
+  then green: CHECK combos (3 valid + 8 rejected), kind CHECK, name
+  unique-among-active-only, membership role/unique, users.role pin, group
+  delete RESTRICTed + memberships CASCADE, user delete C2 (private dies,
+  group/org survive, uploaded_by → NULL).
+- Full offline suite: **272 passed / 0 failed**. Evidence:
+  docs/evidence/g1-evidence.md (G1.1 section, incl. the two test-quality
+  failures encountered: varchar(8) vs 'department' probe; stale identity
+  map vs DB-side cascades).
+
 ## EXACT NEXT STEP
 
-**PART 0 (H1–H6) COMPLETE + CI re-verified green — STOP and report to
-Farhad.** Do NOT start PART 1 (G1 access control): that waits for his
-explicit go after this report. PART 1 will begin with G1.1 (Alembic 0005
-groups schema) per docs/tasks/g1.md.
+G1.2: AccessResolver (Protocol + impl in app/services/access.py;
+audiences_for = ["org"] + active groups + ["user:<id>"], recomputed every
+request, fail closed) — wire conversations chat to it, switch ingest
+metadata to prefixed tokens (org / group:<id> / user:<id>), legacy chat
+keeps ORG_ONLY_FILTER; update the bare-UUID tests with a DECLARED contract
+change. rag-v2 has no bare-UUID vectors (DECISION #9 precondition — verify
+once before switching). Then G1.3 CLIs → G1.4 admin/member routes → g1.sh
+live → mutation re-test. STOP after G1.
