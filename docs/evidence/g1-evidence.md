@@ -121,3 +121,45 @@ and the CLI commands existed — 6 failed on import/ClickException).
 Two test-side fixes after the red→green pass (assertion mismatches, no
 assertion weakened): set_member_role takes role kw-only; the fake
 add_documents receives doc.id as UUID (str() both sides).
+
+## G1.4 — admin group endpoints + member-facing routes (2026-11-12)
+
+Tests FIRST: tests/test_groups_api.py (11 failed before the routes
+existed — every probe landed on missing-route 404s).
+
+**Delivered (9 routes, all session-auth; the inventory pins them):**
+- Admin (`require_admin`): GET/POST `/api/admin/groups`,
+  PATCH/DELETE `/api/admin/groups/{id}` (archive = is_active false;
+  delete gated on `confirm=true`, 409 while documents reference the group
+  — the service refuses and the FK RESTRICT is the backstop),
+  POST/PATCH/DELETE `/api/admin/groups/{id}/members[/{user_id}]`
+  (duplicate membership → 409, unknown group/user → 404, no-op role
+  change → 422, missing membership → 404). Every change audited via the
+  G1.3 service with actor=admin.id; a self-join writes
+  `membership_added` with actor==target (DECISION #4).
+- Member-facing (`get_current_user`): GET `/api/me/groups` (ACTIVE
+  memberships only — the resolver's audience rule, mirrored); GET
+  `/api/groups/{id}/members` (editor of THAT group → 200; plain member →
+  403; outsider, unknown group, or admin-without-membership → 404,
+  indistinguishable from nonexistent — §A8 + DECISION #4).
+- Route inventory extended CONSCIOUSLY (+9 reviewed entries); the B6
+  forced-change gate walks the LIVE route table and covered all 9 new
+  routes automatically (gated user → 403 password_change_required).
+
+| Check | Expected | Actual | Result |
+|---|---|---|---|
+| group+API tests before routes | red | 11 failed | RED (as designed) |
+| after implementation | all green | 14 passed (11 + 3 inventory/authz) | PASS |
+| full suite, compose mode | 0 fail | **296 passed / 0 failed** | PASS |
+| full suite, CI-mode (`ENABLE_WEB_FALLBACK=false`) | 0 fail | **296 passed / 0 failed** | PASS |
+
+What failed first (all reported, none silenced): (1) removed-membership
+probes returned 422 (validation mapping) instead of 404 — the endpoints
+now check the membership row FIRST (a missing membership is a missing
+resource, not a validation error); (2) my own test reused one cookie jar
+for two identities (me-groups came back empty for the admin) — separate
+per-identity clients, the established B6 rule; (3) the C2 endpoint test
+initially tripped the identity map (expired instance attribute access
+after an endpoint-side DB delete; UUID-vs-string compare on the row) —
+column-level selects + ids captured before deletion; assertions
+unchanged in strength.

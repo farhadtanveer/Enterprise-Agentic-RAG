@@ -291,13 +291,32 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   full offline suite **285 passed / 0 failed**. Evidence:
   docs/evidence/g1-evidence.md (G1.3 section).
 
+## 2026-11-12 — G1.4 DONE (admin group endpoints + member-facing routes)
+
+- Commit (this one): 9 routes — admin: GET/POST/PATCH/DELETE
+  /api/admin/groups (+members add/patch/delete; archive = is_active
+  false; delete confirm-gated, 409 while documents exist, FK RESTRICT
+  backstop; missing membership → 404; self-join audited actor==target
+  per DECISION #4); member-facing: GET /api/me/groups (ACTIVE only) and
+  GET /api/groups/{id}/members (editor 200 / member 403 / outsider-or-
+  admin-non-member 404 per DECISION #4). Route inventory +9 consciously;
+  the forced-change gate covered all 9 automatically (walks the live
+  table). Groups router registered in main.py.
+- Tests FIRST: tests/test_groups_api.py (11 red before routes) → green.
+  What failed first: removed-membership probes mapped to 422 instead of
+  404 (endpoints now check the membership row first); two test-side
+  issues (shared cookie jar; identity-map + UUID-vs-string compare).
+- Full suite: **296 passed / 0 failed in BOTH compose mode and CI-mode**
+  (-e ENABLE_WEB_FALLBACK=false). Evidence: docs/evidence/g1-evidence.md
+  (G1.4 section).
+
 ## EXACT NEXT STEP
 
-G1.4: admin groups endpoints (CRUD + membership add/remove/change-role,
-audited; admin self-join visible to editors; delete RESTRICTed → 409;
-archive) + GET /api/me/groups (members) + GET /api/groups/{id}/members
-(editors of THAT group only; outsiders 404; member-non-editor 403).
-Extend the route inventory + forced-change gate tests CONSCIOUSLY. Tests
-first incl. the g1.md minimums: group routes 401/403/404 matrix; C2 user
-delete leaves group docs (endpoint level); group delete with docs → 409.
-Then g1.sh live → mutation re-test → STOP.
+Live verification: scripts/verify/g1.sh (throwaway container + scratch
+db rag_verify_g1, PINECONE_NAMESPACE=multi-user-test, trap cleanup by id,
+≤3 real LLM calls): users A(G1 member)/B(G2 member)/admin(no groups);
+org + G1 + G2 docs via the CLIs; A asks through the FULL chat path and
+cites the G1 doc; B and admin get NO G1 citation; REMOVE A from G1 →
+A's NEXT question with the SAME session cookie loses the G1 doc; the
+org doc visible to all three. Raw evidence → docs/evidence/g1-evidence.md.
+Then mutation re-test → STOP (no G2).

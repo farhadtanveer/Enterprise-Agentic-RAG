@@ -27,9 +27,11 @@ from app.api.deps import require_admin
 from app.core.config import get_settings
 from app.core.db import get_db
 from app.models.document import Document
+from app.models.group import Group, GroupMembership
 from app.models.user import User
 from app.rag.vectorstore import add_documents, delete_document_vectors
 from app.services import documents as documents_service
+from app.services import groups as groups_service
 from app.services import sessions as sessions_service
 from app.services import users as users_service
 from app.services.audit_events import record_event
@@ -441,3 +443,247 @@ def delete_document(
     db.commit()
     _no_store(response)
     return {"status": "deleted", "id": str(document_id)}
+
+
+# --- groups (§A14.7, G1.4) -------------------------------------------------------
+# Conventions: require_admin on all; group CRUD + membership management is
+# ADMIN-ONLY (DECISION #5 — editors manage documents, not people). Every
+# change writes an audit event with ids/roles only. An admin adding
+# THEMSELVES is audited with actor==target and shows up where the group's
+# editors can see it (DECISION #4). Deleting a group is RESTRICTed while
+# documents reference it (409) — archiving (is_active false) is the
+# reversible path.
+
+
+class CreateGroupRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    kind: str = Field(default="department")
+    contact: str | None = Field(default=None, max_length=200)
+
+
+class UpdateGroupRequest(BaseModel):
+    kind: str | None = None
+    contact: str | None = Field(default=None, max_length=200)
+    is_active: bool | None = None
+
+
+class MembershipRequest(BaseModel):
+    username: str | None = Field(default=None, max_length=64)
+    user_id: UUID | None = None
+    role: str = Field(default="member")
+
+
+class RoleChangeRequest(BaseModel):
+    role: str
+
+
+class GroupOut(BaseModel):
+    id: str
+    name: str
+    kind: str
+    contact: str | None
+    is_active: bool
+    member_count: int
+    created_at: str
+
+
+def _group_out(db: DBSession, g: Group) -> dict:
+    from sqlalchemy import func, select as _select
+
+    count = db.execute(
+        _select(func.count()).select_from(GroupMembership).where(GroupMembership.group_id == g.id)
+    ).scalar_one()
+    return {
+        "id": str(g.id), "name": g.name, "kind": g.kind, "contact": g.contact,
+        "is_active": g.is_active, "member_count": count,
+        "created_at": g.created_at.isoformat(),
+    }
+
+
+def _value_error_to_status(exc: ValueError) -> HTTPException:
+    """Service rule violations: duplicates and RESTRICT refusals → 409,
+    everything else (validation, no-op) → 422."""
+    text = str(exc)
+    status = 409 if ("already" in text or "still holds" in text) else 422
+    return HTTPException(status_code=status, detail=text)
+
+
+@router.get("/groups")
+def list_groups(
+    response: Response,
+    admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+) -> dict:
+    rows = db.execute(
+        select(Group).order_by(Group.created_at).limit(500)
+    ).scalars().all()
+    _no_store(response)
+    return {"items": [_group_out(db, g) for g in rows], "total": len(rows)}
+
+
+@router.post("/groups", status_code=201)
+def create_group(
+    payload: CreateGroupRequest,
+    response: Response,
+    admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+) -> dict:
+    try:
+        group = groups_service.create_group(
+            db, payload.name, kind=payload.kind, contact=payload.contact,
+            actor_user_id=admin.id,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise _value_error_to_status(exc) from None
+    db.commit()
+    _no_store(response)
+    return _group_out(db, group)
+
+
+@router.patch("/groups/{group_id}")
+def update_group(
+    group_id: UUID,
+    payload: UpdateGroupRequest,
+    response: Response,
+    admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+) -> dict:
+    group = groups_service.get_group(db, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        groups_service.update_group(
+            db, group, kind=payload.kind, contact=payload.contact,
+            is_active=payload.is_active, actor_user_id=admin.id,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise _value_error_to_status(exc) from None
+    db.commit()
+    _no_store(response)
+    return _group_out(db, group)
+
+
+@router.delete("/groups/{group_id}")
+def delete_group(
+    group_id: UUID,
+    response: Response,
+    confirm: str = "",
+    admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+) -> dict:
+    if confirm != "true":
+        raise HTTPException(
+            status_code=422, detail="Delete requires confirm=true (double confirmation)"
+        )
+    group = groups_service.get_group(db, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        groups_service.delete_group(db, group, actor_user_id=admin.id)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _value_error_to_status(exc) from None
+    except IntegrityError:
+        # the FK RESTRICT is the backstop behind the service's own refusal
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="group still holds documents — delete or re-home them first",
+        ) from None
+    _no_store(response)
+    return {"status": "deleted", "id": str(group_id)}
+
+
+@router.post("/groups/{group_id}/members", status_code=201)
+def add_group_member(
+    group_id: UUID,
+    payload: MembershipRequest,
+    response: Response,
+    admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+) -> dict:
+    group = groups_service.get_group(db, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    if payload.user_id is not None:
+        target = db.get(User, payload.user_id)
+    elif payload.username is not None:
+        target = users_service.get_by_username(db, payload.username)
+    else:
+        raise HTTPException(status_code=422, detail="username or user_id is required")
+    if target is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        membership = groups_service.add_member(
+            db, group, target, role=payload.role, added_by=admin.id,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise _value_error_to_status(exc) from None
+    db.commit()
+    _no_store(response)
+    return {
+        "group_id": str(group.id), "user_id": str(target.id),
+        "username": target.username, "role": membership.role,
+    }
+
+
+@router.patch("/groups/{group_id}/members/{user_id}")
+def change_group_member_role(
+    group_id: UUID,
+    user_id: UUID,
+    payload: RoleChangeRequest,
+    response: Response,
+    admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+) -> dict:
+    group = groups_service.get_group(db, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    if groups_service.get_membership(db, group.id, target.id) is None:
+        raise HTTPException(status_code=404, detail="Not found")  # no such membership
+    try:
+        membership = groups_service.set_member_role(
+            db, group, target, role=payload.role, actor_user_id=admin.id,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise _value_error_to_status(exc) from None
+    db.commit()
+    _no_store(response)
+    return {
+        "group_id": str(group.id), "user_id": str(target.id),
+        "username": target.username, "role": membership.role,
+    }
+
+
+@router.delete("/groups/{group_id}/members/{user_id}")
+def remove_group_member(
+    group_id: UUID,
+    user_id: UUID,
+    response: Response,
+    admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+) -> dict:
+    group = groups_service.get_group(db, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    if groups_service.get_membership(db, group.id, target.id) is None:
+        raise HTTPException(status_code=404, detail="Not found")  # no such membership
+    try:
+        groups_service.remove_member(db, group, target, actor_user_id=admin.id)
+    except ValueError as exc:
+        db.rollback()
+        raise _value_error_to_status(exc) from None
+    db.commit()
+    _no_store(response)
+    return {"status": "removed", "group_id": str(group.id), "user_id": str(user_id)}

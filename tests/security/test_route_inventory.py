@@ -119,6 +119,17 @@ def test_inventory_snapshot_matches_reviewed_allowlist():
         ("GET", "/api/admin/documents"),
         ("POST", "/api/admin/documents"),
         ("DELETE", "/api/admin/documents/{document_id}"),
+        # G1.4 group surface (reviewed addition; require_admin on admin
+        # routes, get_current_user on the member-facing ones)
+        ("GET", "/api/admin/groups"),
+        ("POST", "/api/admin/groups"),
+        ("PATCH", "/api/admin/groups/{group_id}"),
+        ("DELETE", "/api/admin/groups/{group_id}"),
+        ("POST", "/api/admin/groups/{group_id}/members"),
+        ("PATCH", "/api/admin/groups/{group_id}/members/{user_id}"),
+        ("DELETE", "/api/admin/groups/{group_id}/members/{user_id}"),
+        ("GET", "/api/me/groups"),
+        ("GET", "/api/groups/{group_id}/members"),
     }
 
 
