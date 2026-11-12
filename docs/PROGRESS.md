@@ -253,13 +253,36 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
   failures encountered: varchar(8) vs 'department' probe; stale identity
   map vs DB-side cascades).
 
+## 2026-11-12 — G1.2 DONE (AccessResolver + prefixed tokens; §A8 regression caught + fixed)
+
+- Commit (this one): app/services/access.py — AccessResolver Protocol
+  (§A14.3) + DbAccessResolver (audiences_for org + ACTIVE groups +
+  user:<self>, recomputed EVERY call; filter_for single $in; can_read
+  mirrors + fail closed; is_editor per-group C1). conversations chat wired
+  to it. add_documents emits strictly prefixed tokens (org / group:<id> /
+  user:<id>), takes group_id, rejects group-without-group / private-without-
+  owner. Legacy chat keeps ORG_ONLY_FILTER.
+- DECISION #9 precondition verified live first: rag-v2 = 5 vectors, ZERO
+  bare-UUID tokens → no migration.
+- What failed first (the mandate working): my first wiring built the filter
+  AFTER TX1's commit — the B3 pool test caught a §A8 violation (connection
+  held across the graph run). Fix: resolver SELECT inside TX1, before the
+  commit. Also: a "dangling group" row cannot even be STORED (FK RESTRICT =
+  schema-level fail-closed); can_read probes for it go in-memory.
+- DECLARED CONTRACT CHANGES: test_retrieval_acl.py + test_documents_b4.py
+  bare-UUID pins → prefixed grammar (negative proofs unchanged in strength).
+- New tests: audiences 0/1/2 groups + pinned order; revoke-on-next-call
+  (same live user); role flip ≠ audience change (C1); archived group in NO
+  audience; FULL-chat-path G1-vs-G2 isolation with positive controls;
+  admin no-implicit-access until self-join.
+- Full offline suite: **279 passed / 0 failed**. Evidence:
+  docs/evidence/g1-evidence.md (G1.2 section).
+
 ## EXACT NEXT STEP
 
-G1.2: AccessResolver (Protocol + impl in app/services/access.py;
-audiences_for = ["org"] + active groups + ["user:<id>"], recomputed every
-request, fail closed) — wire conversations chat to it, switch ingest
-metadata to prefixed tokens (org / group:<id> / user:<id>), legacy chat
-keeps ORG_ONLY_FILTER; update the bare-UUID tests with a DECLARED contract
-change. rag-v2 has no bare-UUID vectors (DECISION #9 precondition — verify
-once before switching). Then G1.3 CLIs → G1.4 admin/member routes → g1.sh
-live → mutation re-test. STOP after G1.
+G1.3: operator CLIs — create-group, add-member <group> <user> --role,
+ingest-group <group> <file>, remove-member (app/cli.py, tests first,
+group-scope _ingest_one wiring the new add_documents signature). Then
+G1.4 admin groups endpoints + GET /api/me/groups + GET /api/groups/{id}/
+members + route inventory/forced-change extension → g1.sh live → mutation
+re-test. STOP after G1.

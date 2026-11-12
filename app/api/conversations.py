@@ -23,7 +23,7 @@ from app.rag.workflow import ask
 from app.services import conversations as conv_service
 from app.services.audit_events import record_event
 from app.services.ratelimit import SlidingWindowLimiter
-from app.services.retrieval import retrieval_filter_for
+from app.services.access import DbAccessResolver
 from app.services.validation import title_problems
 
 router = APIRouter(prefix="/api", tags=["conversations"])
@@ -218,14 +218,19 @@ def send_message(
     if conv_service.count_messages(db, conv) >= settings.max_messages_per_conversation:
         raise HTTPException(status_code=409, detail={"code": "message_limit_reached"})
     conv_service.add_message(db, conv, "user", payload.question)
+    # the retrieval filter is built INSIDE TX1 (same connection) via the
+    # AccessResolver (§A14.3): audiences recomputed from the DB on EVERY
+    # request — a membership revoke applies to this very message. Building
+    # it here (not after the commit) keeps §A8 discipline: the commit below
+    # releases the connection, so the graph run holds NO DB resource.
+    retrieval_filter = DbAccessResolver(db).filter_for(user)
     db.commit()  # TX1 done — connection returns to the pool
     _no_store(response)
 
     # --- graph run: zero DB resources held ---------------------------------
-    # the retrieval filter is built HERE, from the session user (§A7)
     started = time.perf_counter()
     try:
-        result = ask(payload.question, retrieval_filter=retrieval_filter_for(user))
+        result = ask(payload.question, retrieval_filter=retrieval_filter)
     except Exception:
         # static log line only — no exception text can echo the question (g)
         logger.error("chat graph failed for a conversation message")

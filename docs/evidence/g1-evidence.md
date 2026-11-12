@@ -39,3 +39,55 @@ identity-map objects for rows the DB deleted/updated behind the session
 (FK CASCADE/SET NULL are DB-side) — switched to column-level SELECTs; the
 same pattern produced `ObjectDeletedError` with `expire_all()`. Both are
 test-quality fixes; assertions unchanged in strength.
+
+## G1.2 — AccessResolver + strictly prefixed read_access tokens (2026-11-12)
+
+**DECISION #9 precondition, verified live before the switch:**
+`rag-v2` holds 5 vectors, **zero** with bare-UUID/non-prefixed
+`read_access` tokens → no vector migration, strict grammar
+(`org` / `group:<id>` / `user:<id>`) from day one.
+
+**Delivered:**
+- `app/services/access.py`: the `AccessResolver` Protocol exactly as
+  §A14.3 + `DbAccessResolver` — `audiences_for` =
+  `["org"] + active-group tokens + ["user:<self>"]` recomputed from the DB
+  on EVERY call (no cache anywhere); `filter_for` = the same single `$in`;
+  `can_read` mirrors the filter in Postgres terms and FAILS CLOSED
+  (unknown scope, dangling group, archived group, admin ≠ implicit access);
+  `is_editor` per-group off the membership row (C1).
+- `conversations.send_message` now builds its filter via the resolver.
+  **A §A8 regression this introduced and the fix it forced** (report what
+  failed first): building the filter AFTER TX1's commit checked out a
+  connection that then spanned the graph run — caught red by the B3 pool
+  test `test_tx_discipline_pool_released_during_graph` ("a DB connection
+  was held across the graph run"). Fix: the resolver SELECT runs INSIDE
+  TX1 (same connection) before the commit, so the commit still releases
+  everything and `checkedout()==0` holds during the graph run.
+- `vectorstore.add_documents`: strict prefixed tokens; `group_id` param
+  added; `ValueError` on group-scope without group_id / private without
+  owner. Legacy `/api/chat` keeps the static `ORG_ONLY_FILTER` (D8).
+
+**DECLARED CONTRACT CHANGES to existing tests** (deliberate, per g1.md —
+not weakenings; every negative proof keeps its strength):
+- tests/security/test_retrieval_acl.py: seed private vector now carries
+  `["user:<owner>"]` (was bare UUID); filter pins compare against
+  `DbAccessResolver`; admin pin is `["org", "user:<admin>"]`.
+- tests/test_documents_b4.py: filter-shape pins + metadata assertion flip
+  to the prefixed grammar.
+
+**New tests** (tests/security/test_access_resolver.py, red before the
+module existed): audiences for 0/1/2 groups with pinned order
+`["org", "group:<g1>", "group:<g2>", "user:<self>]`; revoke applies on the
+very next call with the same live user object; member↔editor flips only
+editor powers (C1); can_read mirrors + fails closed (dangling group
+already impossible to STORE — FK RESTRICT is the schema-level fail-closed,
+asserted); archived group in NO audience, readable by no one, re-activation
+restores; FULL chat path group isolation (A=G1 vs B=G2: no cross-leak in
+content/citations/trace, positive controls on both sides via captured
+prompts); admin no-implicit-access until an audited self-join.
+
+| Check | Expected | Actual | Result |
+|---|---|---|---|
+| resolver tests before implementation | red | collection error (no module) | RED (as designed) |
+| touched ACL/B4 tests after update | green | all green | PASS |
+| full offline suite | 0 fail | **279 passed / 0 failed** | PASS |

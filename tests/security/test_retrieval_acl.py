@@ -1,31 +1,39 @@
-"""Retrieval ACL review (review task 6).
+"""Retrieval ACL review (review task 6) — updated for G1.2 tokens.
+
+CONTRACT CHANGE (G1.2, docs/tasks/g1.md PART 1; §A14.1 + DECISION #9): the
+read_access token grammar is STRICTLY prefixed — "org", "group:<id>",
+"user:<id>" — and the authenticated filter is built by the AccessResolver
+(DbAccessResolver) instead of the old two-token retrieval_filter_for(user).
+rag-v2 was verified to hold ZERO bare-UUID vectors (2026-11-12), so no
+vector migration was needed; these tests assert the new grammar directly
+(a deliberate contract change, NOT a weakened test — the negative proofs
+are unchanged in strength).
 
 The app-side machinery (filter built from the session, filter-required
 retriever, $in semantics, doc-scoped chunk ids) is covered by
-tests/test_documents_b4.py. What was missing: the FULL chat path — API →
-ask() → retrieve_kb → retriever — driven against a Pinecone-faithful fake
-index, asserting:
+tests/test_documents_b4.py. What this module proves, on the FULL chat path
+(API → ask() → retrieve_kb → retriever) against a Pinecone-faithful fake:
 
-- user B asking A's question through the full chat path receives NO chunk
-  and NO citation of A's private document;
-- an ADMIN's filter is admin's own id + org — an admin CANNOT retrieve a
-  user's private document (no privilege escalation in retrieval);
+- user B asking A's question receives NO chunk and NO citation of A's
+  private document;
+- an ADMIN's filter is org + admin's own user: token only — an admin
+  CANNOT retrieve a user's private document nor a group they don't belong
+  to (no privilege escalation in retrieval);
 - fail closed: vectors with NO read_access key match nothing;
-- delete-by-doc_id cannot touch another document's chunks (delete-vs-
-  re-ingest / chunk-collision scope).
+- delete-by-doc_id cannot touch another document's chunks.
 """
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.api import auth as auth_api
-from app.api import conversations as conv_api
 from app.core.db import get_db
 from app.main import app as fastapi_app
+from app.models.user import User
 from app.rag import vectorstore as vs
 from app.services import users
-from app.services.retrieval import ORG_ONLY_FILTER, retrieval_filter_for
+from app.services.access import DbAccessResolver
+from app.services.retrieval import ORG_ONLY_FILTER
 
 PEER = ("203.0.113.5", 50000)
 PASSWORD = "a valid longer passphrase"
@@ -83,16 +91,42 @@ class FakeStore:
 
 def seed_vectors():
     """Worst case: A's private chunk is the ONLY good answer and would rank
-    first; plus an org chunk and a legacy no-metadata chunk."""
+    first; plus an org chunk and a legacy no-metadata chunk. G1.2: A's
+    private vector carries the STRICT prefixed token user:<owner>."""
     owner_a = str(uuid4())
     return {
-        "a1": {"metadata": {"doc_id": "doc-a", "read_access": [owner_a],
+        "a1": {"metadata": {"doc_id": "doc-a", "read_access": [f"user:{owner_a}"],
                             "source": "alice-salary.pdf"}, "text": A_PRIVATE_TEXT},
         "o1": {"metadata": {"doc_id": "doc-org", "read_access": ["org"],
                             "source": "vpn-policy.txt"}, "text": ORG_TEXT},
         "l1": {"metadata": {"doc_id": "doc-legacy", "source": "old.txt"},
                "text": LEGACY_TEXT},  # NO read_access — pre-B4 vector
     }, owner_a
+
+
+def _stub_user(uid):
+    """The resolver needs only user.id for audiences_for; a stub keeps the
+    direct filter-shape tests free of DB setup."""
+    return type("U", (), {"id": uid})()
+
+
+def _no_memberships_result():
+    class _R:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    return _R()
+
+
+def _stub_db():
+    class _DB:
+        def execute(self, *a, **kw):
+            return _no_memberships_result()
+
+    return _DB()
 
 
 def test_user_b_full_chat_path_never_sees_a_private_chunks(client, db_session, monkeypatch):
@@ -103,7 +137,6 @@ def test_user_b_full_chat_path_never_sees_a_private_chunks(client, db_session, m
     private chunk would rank FIRST if the filter leaked — B's answer and
     citations must never reference it, and the legacy untagged chunk must
     be invisible (fail closed)."""
-    from app.models.user import User
     from app.rag import workflow as wf
     from app.rag.state import EvidenceGrade, RouteDecision
 
@@ -154,8 +187,9 @@ def test_user_b_full_chat_path_never_sees_a_private_chunks(client, db_session, m
     assert r.status_code == 200, r.text
     body = r.json()
 
-    # the retriever received exactly B's server-built filter
-    assert captured["filter"] == retrieval_filter_for(bob)
+    # the retriever received exactly B's server-built resolver filter
+    assert captured["filter"] == DbAccessResolver(db_session).filter_for(bob)
+    assert captured["filter"]["read_access"]["$in"] == ["org", f"user:{bob.id}"]
 
     everything = body["content"] + "".join(body["trace"]) + str(body["citations"])
     assert "250k" not in everything, "A's private chunk content leaked to B"
@@ -193,35 +227,33 @@ def test_retriever_receives_caller_filter_not_a_blessed_one(monkeypatch):
             return _R()
 
     monkeypatch.setattr(vs, "get_vectorstore", lambda: _Store(fake_index))
-    state = {"current_query": "q", "retrieval_filter": retrieval_filter_for(
-        type("U", (), {"id": str(uuid4())})())}  # B — nobody special
+    state = {"current_query": "q", "retrieval_filter": DbAccessResolver(
+        _stub_db()).filter_for(_stub_user(str(uuid4())))}  # B — nobody special
     docs = vs.get_retriever(state["retrieval_filter"]).invoke("q")
     assert [d.page_content for d in docs] == [ORG_TEXT]  # A's chunk + legacy excluded
 
     # A themselves DO see it — proving the exclusion came from the filter,
     # not from the fake being rigged
-    docs_a = vs.get_retriever(retrieval_filter_for(
-        type("U", (), {"id": owner_a})())).invoke("q")
+    docs_a = vs.get_retriever(DbAccessResolver(_stub_db()).filter_for(
+        _stub_user(owner_a))).invoke("q")
     assert A_PRIVATE_TEXT in [d.page_content for d in docs_a]
 
 
 def test_admin_filter_cannot_retrieve_user_private_doc(db_session):
-    """An admin's retrieval filter is [org, admin-id] — the admin's own id,
-    not a wildcard. Raising a user to admin must NOT widen what their
-    retriever matches on someone else's private chunks."""
-    from app.models.user import User
-
+    """An admin's retrieval filter is [org, user:<admin-id>] — the admin's
+    own token, not a wildcard. Raising a user to admin must NOT widen what
+    their retriever matches on someone else's private chunks (nor on group
+    chunks — covered by test_access_resolver.py)."""
     admin = users.create_user(db_session, "acl-admin", password=PASSWORD, role="admin")
     db_session.commit()
     admin = db_session.execute(
         select(User).where(User.username == "acl-admin")
     ).scalar_one()
-    f = retrieval_filter_for(admin)
-    assert f == {"read_access": {"$in": ["org", str(admin.id)]}}
+    f = DbAccessResolver(db_session).filter_for(admin)
+    assert f == {"read_access": {"$in": ["org", f"user:{admin.id}"]}}
     assert str(admin.id) != "org"
 
     vectors, owner_a = seed_vectors()
-    index = FakeIndex(vectors)
     allowed = set(f["read_access"]["$in"])
     matched = [vid for vid, v in vectors.items()
                if allowed & set(v["metadata"].get("read_access", []))]
@@ -232,8 +264,8 @@ def test_missing_read_access_fails_closed_for_every_filter():
     vectors, owner_a = seed_vectors()
     for f in (
         ORG_ONLY_FILTER,
-        retrieval_filter_for(type("U", (), {"id": owner_a})()),
-        retrieval_filter_for(type("U", (), {"id": str(uuid4())})()),
+        DbAccessResolver(_stub_db()).filter_for(_stub_user(owner_a)),
+        DbAccessResolver(_stub_db()).filter_for(_stub_user(str(uuid4()))),
     ):
         allowed = set(f["read_access"]["$in"])
         matched = [vid for vid, v in vectors.items()

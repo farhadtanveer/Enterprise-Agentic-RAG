@@ -26,7 +26,8 @@ from app.models.document import Document
 from app.services import conversations as svc_conv
 from app.services import documents as docs_service
 from app.services import users
-from app.services.retrieval import ORG_ONLY_FILTER, retrieval_filter_for
+from app.services.access import DbAccessResolver
+from app.services.retrieval import ORG_ONLY_FILTER
 from app.services.ratelimit import SlidingWindowLimiter
 
 PEER = ("203.0.113.5", 50000)
@@ -65,11 +66,26 @@ def login(client, username):
 
 
 def test_filter_builders():
+    """CONTRACT CHANGE (G1.2, DECISION #9): the authenticated filter is built
+    by the AccessResolver with STRICTLY prefixed tokens — "org" plus
+    "user:<id>" (plus group:<id> tokens when memberships exist; covered in
+    tests/security/test_access_resolver.py). The old bare-UUID form is gone."""
     class U:
         id = "01900000-0000-7000-8000-000000000001"
 
-    assert retrieval_filter_for(U()) == {
-        "read_access": {"$in": ["org", "01900000-0000-7000-8000-000000000001"]}
+    class _NoMemberships:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _DB:
+        def execute(self, *a, **kw):
+            return _NoMemberships()
+
+    assert DbAccessResolver(_DB()).filter_for(U()) == {
+        "read_access": {"$in": ["org", "user:01900000-0000-7000-8000-000000000001"]}
     }
     assert ORG_ONLY_FILTER == {"read_access": {"$in": ["org"]}}
 
@@ -94,7 +110,9 @@ def test_authenticated_chat_sends_user_specific_filter(client, db_session, monke
         headers={"X-CSRF-Token": csrf},
     )
     assert r.status_code == 200
-    assert captured["filter"] == {"read_access": {"$in": ["org", str(user.id)]}}
+    # G1.2: the filter is resolver-built with prefixed tokens
+    assert captured["filter"] == DbAccessResolver(db_session).filter_for(user)
+    assert captured["filter"]["read_access"]["$in"] == ["org", f"user:{user.id}"]
 
 
 def test_legacy_chat_sends_org_only_filter(client, db_session, monkeypatch):
@@ -199,7 +217,8 @@ def test_add_documents_attaches_acl_metadata_and_replaces_by_doc_id():
     private_chunks, private_ids = store.added[0]
     for c in private_chunks:
         assert c.metadata["doc_id"] == "11111111-1111-4111-8111-111111111111"
-        assert c.metadata["read_access"] == ["22222222-2222-4222-8222-222222222222"]
+        # CONTRACT CHANGE (G1.2, DECISION #9): strictly prefixed private token
+        assert c.metadata["read_access"] == ["user:22222222-2222-4222-8222-222222222222"]
         assert c.metadata["source"] == "roadmap.md"
     org_chunks, org_ids = store.added[1]
     assert org_chunks[0].metadata["read_access"] == ["org"]
@@ -255,18 +274,32 @@ def test_first_ingest_into_empty_namespace_survives_pinecone_404(monkeypatch):
 
 def test_fake_acl_store_semantics_org_vs_private():
     """§A11.5 semantics with a fake store: the $in filter decides per-vector
-    via read_access membership — A never receives B's private chunk."""
+    via read_access membership — A never receives B's private chunk.
+    CONTRACT CHANGE (G1.2, DECISION #9): strictly prefixed user: tokens."""
+    A, B = "01900000-0000-7000-8000-00000000000a", "01900000-0000-7000-8000-00000000000b"
     vectors = {
         "org-1": ["org"],
-        "a-private": ["01900000-0000-7000-8000-00000000000a"],
-        "b-private": ["01900000-0000-7000-8000-00000000000b"],
+        "a-private": [f"user:{A}"],
+        "b-private": [f"user:{B}"],
     }
 
     def query(filter):
         allowed = set(filter["read_access"]["$in"])
         return sorted(k for k, access in vectors.items() if allowed & set(access))
 
-    assert query(retrieval_filter_for(type("U", (), {"id": "01900000-0000-7000-8000-00000000000a"})())) == [
+    class _NoMemberships:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _DB:
+        def execute(self, *a, **kw):
+            return _NoMemberships()
+
+    resolver = DbAccessResolver(_DB())
+    assert query(resolver.filter_for(type("U", (), {"id": A})())) == [
         "a-private", "org-1"
     ]
     assert query(ORG_ONLY_FILTER) == ["org-1"]

@@ -148,8 +148,12 @@ def _chunk_id(doc_id: str, chunk) -> str:
     ).hexdigest()
 
 
-def add_documents(chunks, *, doc_id: str, scope: str, owner_id: str | None, source_name: str):
-    """Attach the ACL metadata scheme (§A7) and index the document's chunks.
+def add_documents(chunks, *, doc_id: str, scope: str, owner_id: str | None, source_name: str,
+                  group_id: str | None = None):
+    """Attach the ACL metadata scheme (§A14.1, G1.2) and index the document's
+    chunks. read_access tokens are STRICTLY prefixed (DECISION #9 — rag-v2
+    verified to hold zero bare-UUID vectors on 2026-11-12):
+    org → ["org"], private → ["user:<owner>"], group → ["group:<group>"].
 
     Replace semantics per DOCUMENT: wipe this doc_id's vectors before
     adding, so a changed re-upload never leaves stale chunks behind —
@@ -157,7 +161,16 @@ def add_documents(chunks, *, doc_id: str, scope: str, owner_id: str | None, sour
     """
     store = get_vectorstore()
     doc_id = str(doc_id)
-    read_access = ["org"] if scope == "org" else [str(owner_id)]
+    if scope == "org":
+        read_access = ["org"]
+    elif scope == "group":
+        if not group_id:
+            raise ValueError("group-scope documents require group_id")
+        read_access = [f"group:{group_id}"]
+    else:
+        if not owner_id:
+            raise ValueError("private documents require owner_id")
+        read_access = [f"user:{owner_id}"]
     for chunk in chunks:
         chunk.metadata.update(
             doc_id=doc_id,

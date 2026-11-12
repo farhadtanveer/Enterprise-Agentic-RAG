@@ -1,19 +1,16 @@
-"""Server-side retrieval filters (§A7) — B4.
+"""Server-side retrieval filters (§A7/§A14.3).
 
-The filter is ALWAYS built here, from authenticated identity — the client
-sends nothing and no code path retrieves unfiltered (get_retriever now
-refuses a missing filter).
+Authenticated filters are built by the AccessResolver
+(app.services.access.DbAccessResolver) since G1.2 — org + active group
+tokens + the user's own private token, recomputed from the DB on every
+request. This module keeps only the legacy D8 constant: a static key
+proves nothing, so legacy /api/chat retrieval is org-only.
 
-Pinecone array semantics: a vector's ``read_access`` is ``["org"]`` for org
-docs or ``[<owner_id>]`` for private docs; ``$in`` matches if ANY element
-matches, so one condition expresses ``scope == org OR owner == me``.
+Pinecone array semantics: a vector's ``read_access`` lists STRICTLY
+prefixed tokens ("org", "group:<id>", "user:<id>" — DECISION #9); ``$in``
+matches if ANY element matches.
 """
 
 ORG_ONLY_FILTER = {"read_access": {"$in": ["org"]}}
 # D8: legacy /api/chat holds no identity — a static key proves nothing, so
 # legacy retrieval is org-only from B4 on.
-
-
-def retrieval_filter_for(user) -> dict:
-    """Authenticated users get org docs + their own private docs."""
-    return {"read_access": {"$in": ["org", str(user.id)]}}
