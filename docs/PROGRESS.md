@@ -176,9 +176,25 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
 - Evidence: docs/evidence/g1-part0-evidence.md (H3 section incl. the
   exact red assertion and the reproduce-red recipe).
 
+## 2026-11-12 — G1 PART 0: H4 DONE (web-fallback default flipped AND the switch made functional)
+
+- Commit (this one): config default `enable_web_fallback` True → **False**
+  (D6 amended §A14/CLAUDE.md — the flip had never landed), AND the
+  previously DECORATIVE kill switch now actually gates: after_kb routes
+  KB-weak → insufficient when off (no rewrite, Tavily never invoked);
+  conditional-edge map gains the existing insufficient target. README row
+  corrected; .env untouched (explicit operator opt-in stays valid).
+- Explicit CONTRACT CHANGES to existing tests (declared, not weakened):
+  settings pin True → False; the 3 web-path graph tests now opt in with
+  enable_web_fallback=True (same assertions under the opt-in flag).
+- New test: exploding-Tavily fake proves the question text NEVER reaches
+  Tavily under the default (retry_count 0, query never rewritten).
+- Full offline suite: **254 passed / 0 failed** (63.9s; 253 + 1).
+- Evidence: docs/evidence/g1-part0-evidence.md (H4 section).
+
 ## EXACT NEXT STEP
 
-PART 0 H4: pin ENABLE_WEB_FALLBACK default = false (A14/D6) with a test.
-Then H5 (report data/audit.db), then H6 LAST (re-ingest sample KB into
-rag-v2, verify by document listing + per-document vector ids). STOP after
-PART 0 and report. Do NOT start PART 1 (G1).
+PART 0 H5: REPORT data/audit.db (path + row count) — Farhad will delete
+it himself; never delete it here. Then H6 LAST: re-ingest data/sample_kb
+as ORG documents into rag-v2 via ingest-org CLI, verify by document
+listing + per-document exact vector ids (no stats). STOP after PART 0.

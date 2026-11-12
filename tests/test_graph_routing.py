@@ -88,6 +88,10 @@ def test_good_kb_evidence_answers_from_private_kb(monkeypatch):
 
 
 def test_weak_kb_good_web_answers_from_web(monkeypatch):
+    s = get_settings()
+    # CONTRACT CHANGE (H4): web fallback now defaults OFF (D6 amended) — the
+    # web path is opt-in, so this test explicitly enables it.
+    monkeypatch.setattr(s, "enable_web_fallback", True)
     monkeypatch.setattr(wf, "_llm", _FakeLLM(route="kb", grades=("weak", "good")))
     monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
     monkeypatch.setattr(wf, "_web_search", _FakeTavily())
@@ -101,6 +105,9 @@ def test_weak_kb_good_web_answers_from_web(monkeypatch):
 
 def test_all_weak_and_retries_exhausted_stops_honestly(monkeypatch):
     s = get_settings()
+    # CONTRACT CHANGE (H4): web fallback now defaults OFF (D6 amended) —
+    # opt in here to keep exercising the rewrite/Tavily loop.
+    monkeypatch.setattr(s, "enable_web_fallback", True)
     monkeypatch.setattr(s, "max_retries", 1)
     monkeypatch.setattr(wf, "_llm", _FakeLLM(route="kb", grades=("weak", "weak")))
     monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
@@ -117,6 +124,7 @@ def test_all_weak_and_retries_exhausted_stops_honestly(monkeypatch):
 
 def test_rewrite_loop_is_bounded_even_with_bad_grades(monkeypatch):
     s = get_settings()
+    monkeypatch.setattr(s, "enable_web_fallback", True)  # CONTRACT CHANGE (H4): opt-in
     monkeypatch.setattr(s, "max_retries", 2)
     monkeypatch.setattr(wf, "_llm", _FakeLLM(route="kb", grades=("weak", "weak", "weak")))
     monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
@@ -126,3 +134,27 @@ def test_rewrite_loop_is_bounded_even_with_bad_grades(monkeypatch):
 
     assert out["source_used"] == "insufficient_evidence"
     assert out["retry_count"] == 2
+
+
+def test_default_off_weak_kb_stops_at_insufficient_and_tavily_is_never_called(monkeypatch):
+    """H4 (D6 as amended): with the DEFAULT (fallback OFF), weak KB evidence
+    goes straight to 'insufficient' — no rewrite loop, and the question
+    text never reaches Tavily (the fake raises if invoked)."""
+    s = get_settings()
+    monkeypatch.setattr(s, "enable_web_fallback", False)  # the amended default, explicit
+
+    class _ExplodingTavily:
+        def invoke(self, payload):
+            raise AssertionError("question text reached Tavily with the fallback disabled")
+
+    monkeypatch.setattr(wf, "_llm", _FakeLLM(route="kb", grades=("weak",)))
+    monkeypatch.setattr(wf, "get_retriever", lambda filter=None: _FakeRetriever())
+    monkeypatch.setattr(wf, "_web_search", _ExplodingTavily())
+
+    out = wf.ask("obscure question", retrieval_filter=ORG_ONLY_FILTER)
+
+    assert out["source_used"] == "insufficient_evidence"
+    assert out["retry_count"] == 0  # short-circuit: no rewrite, no web grade
+    assert out["current_query"] == out["question"]  # never even rewritten
+    assert "enough reliable evidence" in out["answer"]
+    assert not any("Tavily" in line or "Web fallback" in line for line in out["trace"])

@@ -28,7 +28,12 @@ def test_session_lifetime_defaults_match_design():
 
 def test_feature_flags_and_limits_defaults():
     s = _settings()
-    assert s.enable_web_fallback is True  # D6: kill switch defaults on
+    # CONTRACT CHANGE (H4, docs/tasks/g1.md): D6 was AMENDED by §A14
+    # (decided 2026-11-09) — the web fallback now defaults to FALSE. The
+    # old pin said "kill switch defaults on"; the amended decision makes
+    # "insufficient" the default terminal state, query text never reaches
+    # Tavily unless a deployment explicitly opts in.
+    assert s.enable_web_fallback is False
     assert s.max_upload_mb == 25
     assert s.conversation_retention_days == 0  # D5: off until a policy exists
     assert s.pinecone_test_namespace == "multi-user-test"

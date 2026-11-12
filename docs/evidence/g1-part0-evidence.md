@@ -116,3 +116,39 @@ Deadlock-free: both transactions lock the admin set in one statement
 **How to reproduce the red state:** revert app/services/users.py to the
 COUNT aggregate and run
 `docker compose --profile test run --rm test python -m pytest tests/security/test_last_admin_race.py -q`.
+
+## H4 — ENABLE_WEB_FALLBACK defaults to false, AND the switch now works (2026-11-12)
+
+**What H4 found:** two problems, not one. (1) The CODE default was still
+`true` with a test pinning it — the D6 AMENDMENT (§A14, decided
+2026-11-09, and CLAUDE.md) says default `false`; the flip never landed.
+(2) Worse, the kill switch was DECORATIVE: nothing read the setting —
+`after_kb` routed KB-weak → search_web unconditionally, so even
+`ENABLE_WEB_FALLBACK=false` let question text reach Tavily. A default
+flip alone would have pinned a fake guarantee.
+
+**Changes:** config default → False (comment cites the amended D6);
+`after_kb` now honors the flag — KB-weak with fallback off routes
+straight to `insufficient` (no rewrite loop; the conditional edge map
+gains the existing "insufficient" target — topology otherwise unchanged);
+README env-table row corrected; `.env` deliberately UNTOUCHED (it sets
+`ENABLE_WEB_FALLBACK=true` — an explicit operator opt-in, which remains
+valid under the new default).
+
+**Explicit CONTRACT CHANGES to existing tests (not weakenings):**
+- tests/test_settings.py `test_feature_flags_and_limits_defaults`: pinned
+  True → now pins False (the amended decision; old comment said "kill
+  switch defaults on").
+- tests/test_graph_routing.py: the three web-path tests (weak-KB→web,
+  retry-exhaustion, bounded-rewrite) now set `enable_web_fallback=True`
+  explicitly — the same behavioral assertions, under the now-opt-in flag.
+
+**New test:** `test_default_off_weak_kb_stops_at_insufficient_and_tavily_
+is_never_called` — with fallback OFF, an EXPLODING Tavily fake (raises if
+so much as invoked) proves the question text never reaches Tavily;
+source_used=insufficient_evidence, retry_count=0, query never rewritten.
+
+| Check | Expected | Actual | Result |
+|---|---|---|---|
+| settings + routing + workflow tests | 0 fail | 16 passed | PASS |
+| full offline suite | 0 fail | **254 passed / 0 failed** (63.9s) | PASS |

@@ -45,9 +45,11 @@ class Settings(BaseSettings):
     cookie_secure: bool = True
     session_idle_hours: int = 168  # 7 days sliding
     session_absolute_days: int = 30  # hard cap from login
-    # D6 kill switch: false = web fallback node short-circuits, query text
-    # never reaches Tavily.
-    enable_web_fallback: bool = True
+    # D6 kill switch, AMENDED by §A14 (decided 2026-11-09): FALSE by
+    # default — weak KB evidence stops honestly at "insufficient" and the
+    # question text never reaches Tavily. Opt in per deployment that
+    # accepts external search.
+    enable_web_fallback: bool = False
     max_upload_mb: int = 25  # 413 beyond this; enforced while streaming
     # D5: 0 = keep conversations until the user deletes them (sweep deferred).
     conversation_retention_days: int = 0

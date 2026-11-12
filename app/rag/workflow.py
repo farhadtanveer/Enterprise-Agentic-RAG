@@ -94,8 +94,15 @@ Otherwise return weak. JSON: {{"grade":"good"}} or {{"grade":"weak"}}.
 """)
     return {"kb_grade": grade.grade, "trace": add_trace(state, f"KB evidence grade → {grade.grade.upper()}")}
 
-def after_kb(state: AgentState) -> Literal["generate_from_kb", "search_web"]:
-    return "generate_from_kb" if state["kb_grade"] == "good" else "search_web"
+def after_kb(state: AgentState) -> Literal["generate_from_kb", "search_web", "insufficient"]:
+    if state["kb_grade"] == "good":
+        return "generate_from_kb"
+    # D6 as amended (§A14, decided 2026-11-09): ENABLE_WEB_FALLBACK defaults
+    # to FALSE — weak KB evidence stops honestly at "insufficient" and the
+    # question text never reaches Tavily. The flag is an explicit opt-in.
+    if not settings.enable_web_fallback:
+        return "insufficient"
+    return "search_web"
 
 def search_web(state: AgentState):
     result = tavily_search(state["current_query"])
@@ -234,7 +241,8 @@ def build_graph():
     })
     graph.add_edge("retrieve_kb", "grade_kb")
     graph.add_conditional_edges("grade_kb", after_kb, {
-        "generate_from_kb": "generate_from_kb", "search_web": "search_web"
+        "generate_from_kb": "generate_from_kb", "search_web": "search_web",
+        "insufficient": "insufficient",
     })
     graph.add_edge("search_web", "grade_web")
     graph.add_conditional_edges("grade_web", after_web, {
