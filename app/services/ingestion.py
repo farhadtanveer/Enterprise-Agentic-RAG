@@ -2,6 +2,7 @@ import codecs
 import logging
 import multiprocessing
 import threading
+import time
 import zipfile
 from pathlib import Path
 from typing import Callable, Iterable
@@ -130,31 +131,58 @@ def _parse_worker(conn, path_str: str) -> None:
 
 def _spawn_and_collect(target, args, *, timeout_s: float, memory_limit_mb: int | None = None):
     """Run ``target(conn, *args)`` in a spawned process; collect its pipe
-    verdict. Timeout → kill → ParseFailed('timeout'); nonzero exit, no
-    verdict, or a broken pipe (incl. an OOM kill) → ParseFailed('crashed');
-    a 'caps' verdict → ParseFailed('caps'). The parent always survives."""
+    verdict. Timeout → kill → ParseFailed('timeout'); no verdict or a
+    broken pipe (incl. an OOM kill) → ParseFailed('crashed'); a 'caps'
+    verdict → ParseFailed('caps'). The parent always survives.
+
+    The verdict is READ WHILE THE CHILD RUNS (deadline-bounded poll loop),
+    never after a bare join: a payload larger than the pipe buffer (the
+    extracted text of any real document) would otherwise block the child
+    in send() forever while the parent waits in join() — a deadlock found
+    live by g2a.sh on the first ~800KB upload (2026-11-16)."""
     ctx = multiprocessing.get_context("spawn")
     parent_conn, child_conn = ctx.Pipe(duplex=False)
     proc = ctx.Process(target=_child_entry, args=(target, args, child_conn, memory_limit_mb))
     proc.start()
     child_conn.close()  # parent holds only the read end
-    proc.join(timeout=timeout_s)
-    if proc.is_alive():
-        proc.kill()
-        proc.join()
-        raise ParseFailed("timeout")
-    try:
-        if not parent_conn.poll(timeout=5):
-            raise ParseFailed("crashed")  # exited without a verdict
-        status, payload = parent_conn.recv()
-    except (EOFError, OSError):
-        raise ParseFailed("crashed") from None  # died mid-send (OOM kill)
-    if status == "ok":
-        return payload
-    if status == "error":
-        # class only — never parser text (§A6/F4)
-        logger.warning("parse subprocess failed: %s", payload)
-    raise ParseFailed(status if status == "caps" else "crashed")
+    deadline = time.monotonic() + timeout_s
+    status = payload = None
+    got = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc.kill()
+            proc.join()
+            raise ParseFailed("timeout")
+        if parent_conn.poll(min(remaining, 1.0)):
+            try:
+                status, payload = parent_conn.recv()  # drains any size
+                got = True
+                break
+            except Exception:
+                raise ParseFailed("crashed") from None  # died mid-send
+        if not proc.is_alive():
+            # exited: one short drain for a verdict already in flight
+            if parent_conn.poll(1.0):
+                try:
+                    status, payload = parent_conn.recv()
+                    got = True
+                    break
+                except Exception:
+                    pass
+            if not got:
+                raise ParseFailed("crashed")
+    if got:
+        proc.join(timeout=5)  # unblocked child exits promptly; kill if not
+        if proc.is_alive():
+            proc.kill()
+            proc.join()
+        if status == "ok":
+            return payload  # a received verdict stands even if exit was messy
+        if status == "error":
+            # class only — never parser text (§A6/F4)
+            logger.warning("parse subprocess failed: %s", payload)
+        raise ParseFailed(status if status == "caps" else "crashed")
 
 
 def _child_entry(target, args, q, memory_limit_mb) -> None:

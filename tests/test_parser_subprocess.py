@@ -234,3 +234,17 @@ def test_ingest_gate_serializes_slow_parses(client, db_session, monkeypatch, tmp
         rs = list(pool.map(fire, (0, 1, 2)))
     assert all(r.status_code == 201 for r in rs), [r.text for r in rs]
     assert state["max"] == 1, f"gate failed — {state['max']} parses ran at once"
+
+
+def test_large_verdict_does_not_deadlock_the_pipe(tmp_path, monkeypatch):
+    """FOUND LIVE by g2a.sh (2026-11-16): a verdict larger than the pipe
+    buffer (~64KB) deadlocked the old join-first parent — the child blocked
+    in send() forever while the parent waited in join(), surfacing as a
+    60s timeout and a bogus 422 on every real-size upload. The parent must
+    drain the pipe WHILE the child runs. Regression: a 200KB extraction
+    must parse."""
+    monkeypatch.setenv("PARSER_MAX_CHARS", "2000000")  # default — no truncation
+    f = tmp_path / "large.txt"
+    f.write_text("x" * 200_000, encoding="utf-8")
+    docs = load_file(f)
+    assert sum(len(d.page_content) for d in docs) == 200_000
