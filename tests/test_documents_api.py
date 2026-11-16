@@ -436,3 +436,18 @@ def test_audit_events_carry_no_filenames(client, db_session):
     blob = str(events[0].details)
     assert "salary" not in blob and ".txt" not in blob  # no filenames in audits
     assert events[0].details.get("scope") == "private"
+
+
+def test_unknown_document_id_is_404_on_every_verb(client, db_session):
+    """A6 sweep: the §A8 404-rule holds for the whole documents surface —
+    an unknown id is indistinguishable from a foreign id on every verb
+    (existence is never leaked)."""
+    u = make(db_session, "a6-user")
+    csrf = login(client, "a6-user")
+    ghost = "00000000-0000-0000-0000-000000000000"
+    assert client.get(f"/api/documents/{ghost}").status_code == 404
+    assert client.patch(f"/api/documents/{ghost}", json={"display_name": "x"},
+                        headers={"X-CSRF-Token": csrf}).status_code == 404
+    assert client.delete(f"/api/documents/{ghost}",
+                         headers={"X-CSRF-Token": csrf}).status_code == 404
+    assert db_session.execute(select(Document)).scalars().all() == []

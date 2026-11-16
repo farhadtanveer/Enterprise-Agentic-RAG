@@ -410,3 +410,37 @@ B4 hardening through the shared service functions. Five proofs
 What failed first: my own assertion demanded the symlink be GONE — the
 correct behavior is refusal-in-place; test fixed, rule untouched.
 Suite: 385 passed / 0 failed (379 + 5... 380 + 5).
+
+## G2 PART A — A5: admin documents listing (C4) + near-quota (2026-11-16)
+
+- GET /api/admin/documents now returns: items = ORG **and GROUP** documents
+  per-document (id/scope/name/status/size/chunks/created_at; review dates
+  join when B3 adds the columns), total_org + total_group +
+  private_documents_total (the B6-pinned count key), **private_aggregates**
+  (users/total_docs/total_bytes) present ONLY at ≥5 distinct private owners
+  (D3 suppression — null otherwise), and **near_quota_users** (user_id,
+  username, private_docs, private_bytes) at ≥80% of EITHER personal axis
+  (USER_UPLOAD_TOTAL_MB / USER_UPLOAD_MAX_DOCS) — the enforcement view the
+  design mandates (A14.6/DECISION #1). Bulk purge endpoint untouched.
+- Privacy: ZERO private rows/filenames anywhere in the response — asserted
+  against 6 owners with "salary bands N.pdf" documents (the response blob
+  contains neither "salary" nor ".pdf"); below 5 owners even the aggregate
+  is null and no usernames appear. Usernames on the near-quota list ARE
+  sanctioned (that list exists so ops can act; it carries usage counters,
+  never filenames or content).
+- Tests red-first (5 failed on the old org-only listing), then green; the
+  pre-existing admin listing test (private_documents_total pin, no
+  SUPER-SECRET leak) passes unchanged.
+- Suite: 391 passed / 0 failed.
+
+## G2 PART A — A6: route gates + 404-rule sweep (2026-11-16)
+
+- All five A1 routes entered the route inventory in the A1 commit (the
+  inventory test pins the full table); the forced-change gate walks the
+  live route table automatically (G1.4 pattern) and covered them without
+  extra code. Audit events across the surface carry ids/counters only —
+  asserted by test_audit_events_carry_no_filenames (uploads) and the
+  existing document_deleted shape (scope + checksum hash).
+- Added the explicit sweep: an unknown document id answers 404 on GET,
+  PATCH and DELETE for an authenticated caller (existence never leaks on
+  any verb); no rows result. 16/16 green in the two affected files.
