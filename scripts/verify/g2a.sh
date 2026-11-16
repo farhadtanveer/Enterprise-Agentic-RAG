@@ -38,7 +38,7 @@ PASS=0; FAIL=0; SKIPPED=0
 ADMIN_PW="Verify-Boss-Passphrase-G2A"
 USER_PW="G2A-User-Passphrase-5"
 DOCIDS=""
-CONVS=0
+CONVS=0  # counted via a marker file (chat runs in a $( ) subshell)
 
 ck() { local d="$1" e="$2" a="$3"
   if [ -z "$e" ] || [ -z "$a" ]; then echo "FAIL  $d  (EMPTY expected/actual — upstream step failed)"; FAIL=$((FAIL+1)); return; fi
@@ -60,21 +60,34 @@ print(json.loads(sys.stdin.read()).get('$1', ''))
 " 2>/dev/null; }
 uid_of() { psql "SELECT id FROM users WHERE username='$1'"; }
 
-vec_ids_for() { # $1 = document id → exact vector ids (space-separated)
-  dc exec -i $APP python -c "
-from app.rag.vectorstore import ensure_index
-idx = ensure_index()
-ids = []
-for page in idx.list(namespace='$NS', limit=100):
-    ids.extend([v if isinstance(v, str) else v.id
-                for v in (page if isinstance(page, list) else page.vectors)])
-if ids:
-    fetched = idx.fetch(ids=ids, namespace='$NS').vectors
-    print(' '.join(i for i in ids if i in fetched
-                   and str((fetched[i].metadata or {}).get('doc_id')) == '$1'))
-" 2>/dev/null; }
-
-ragv2_ids() { dc exec -i $APP python -c "
+vec_ids_for() { # $1 = document id -> its EXACT production vector ids,
+  # recomputed from the STORED FILE (uploads/<id>/<id>.<ext>) through the
+  # production load+chunk+_chunk_id path and FETCHED by id. Never a
+  # namespace-wide list (this script's scale makes list+fetch 414), never
+  # raw-content hashing (the splitter owns the chunk text).
+  local want="$1" tries=0 got=""
+  while [ "$tries" -lt 6 ] && [ -z "$got" ]; do
+    tries=$((tries+1))
+    [ "$tries" -gt 1 ] && sleep 2  # ride out Pinecone upsert lag
+  got=$(dc exec $APP python -c "
+from pathlib import Path
+from app.rag.vectorstore import ensure_index, _chunk_id
+from app.services.ingestion import _load_local, chunk_documents
+doc_id = '$want'
+paths = list((Path('/app/uploads') / doc_id).glob(doc_id + '.*'))
+if not paths:
+    print('', end='')
+else:
+    chunks = chunk_documents(_load_local(paths[0]))
+    cids = [_chunk_id(doc_id, c) for c in chunks][:50]
+    idx = ensure_index()
+    fetched = idx.fetch(ids=cids, namespace='$NS').vectors
+    print(' '.join(i for i in cids if i in fetched))
+" </dev/null 2>/dev/null)
+  done
+  printf '%s' "$got"
+}
+ragv2_ids() { dc exec -i $APP python -c " # noqa: stdin closed below
 from app.rag.vectorstore import ensure_index
 idx = ensure_index()
 ids = []
@@ -82,7 +95,7 @@ for page in idx.list(namespace='rag-v2', limit=100):
     ids.extend([v if isinstance(v, str) else v.id
                 for v in (page if isinstance(page, list) else page.vectors)])
 print(' '.join(sorted(ids)) if ids else '(empty)')
-" 2>/dev/null; }
+" </dev/null 2>/dev/null; }
 
 cleanup() {
   dc exec -i $APP python -c "
@@ -115,17 +128,21 @@ else:
 trap cleanup EXIT
 
 mkuser() { # $1 username (admin session; temp credentials -> forced change)
-  local made jar="$TMP/$1-jar" csrf
-  made=$(curl -s -b "$TMP/admin-jar" -X POST $BASE/api/admin/users \
+  local made jar="$TMP/$1-jar" csrf login_code pw_code me_code
+  made=$(curl -s -b "$TMP/g2aboss-jar" -X POST $BASE/api/admin/users \
     -H "Content-Type: application/json" -H "X-CSRF-Token: $ACSRF" \
     -d '{"username":"'$1'","password":"'$USER_PW'"}')
   ckc "user $1 created" '"must_change_password":true' "$made"
-  curl -s -c "$jar" -o /dev/null -X POST $BASE/api/auth/login \
-    -H "Content-Type: application/json" -d '{"username":"'$1'","password":"'$USER_PW'"}'
+  login_code=$(curl -s -c "$jar" -o /dev/null -w '%{http_code}' -X POST $BASE/api/auth/login \
+    -H "Content-Type: application/json" -d '{"username":"'$1'","password":"'$USER_PW'"}')
   csrf=$(awk '/csrf/{print $NF}' "$jar" | tail -1)
-  curl -s -b "$jar" -o /dev/null -X POST $BASE/api/auth/password \
+  pw_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" -X POST $BASE/api/auth/password \
     -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" \
-    -d '{"old_password":"'$USER_PW'","new_password":"'$USER_PW'-changed"}'
+    -d '{"old_password":"'$USER_PW'","new_password":"'$USER_PW'-changed"}')
+  me_code=$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" $BASE/api/me)
+  if [ "$login_code" != "200" ] || [ "$pw_code" != "200" ] || [ "$me_code" != "200" ]; then
+    echo "FAIL  mkuser($1) login=$login_code pw=$pw_code me-after=$me_code"; FAIL=$((FAIL+1))
+  fi
 }
 
 csrf_of() { awk '/csrf/{print $NF}' "$TMP/$1-jar" | tail -1; }
@@ -149,6 +166,21 @@ upbody() { # upbody <username> <file> <name> → response body
   curl -s --max-time 120 -b "$TMP/$u-jar" -X POST $BASE/api/documents \
     -H "X-CSRF-Token: $(csrf_of "$u")" -F "file=@$w;filename=$name"
 }
+upcb() { # upcb <username> <file> <name> → body \n code (ONE attempt)
+  local u="$1" f="$2" name="$3" w
+  w=$(cygpath -w "$f")
+  curl -s -w '\n%{http_code}' --max-time 120 -b "$TMP/$u-jar" \
+    -X POST $BASE/api/documents -H "X-CSRF-Token: $(csrf_of "$u")" \
+    -F "file=@$w;filename=$name"
+}
+admin_upload() { # admin_upload <file> <name> → body \n code (ORG scope — the
+  # ORG upload endpoint; /api/documents is private/group by design)
+  local f="$1" name="$2" w
+  w=$(cygpath -w "$f")
+  curl -s -w '\n%{http_code}' --max-time 120 -b "$TMP/g2aboss-jar" \
+    -X POST $BASE/api/admin/documents -H "X-CSRF-Token: $ACSRF" \
+    -F "file=@$w;filename=$name"
+}
 
 chat() { # $1 username, $2 question → conversation answer (CONVS counter++)
   local u="$1" q="$2" csrf conv cid
@@ -157,7 +189,7 @@ chat() { # $1 username, $2 question → conversation answer (CONVS counter++)
     -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" -d '{}')
   cid=$(printf '%s' "$conv" | jsonget id)
   if [ -z "$cid" ]; then echo "CONV-FAILED: $conv"; return; fi
-  CONVS=$((CONVS+1))
+  : > "$TMP/conv-$cid"  # marker: one file per conversation
   curl -s --max-time 240 -b "$TMP/$u-jar" -X POST "$BASE/api/conversations/$cid/messages" \
     -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" \
     -d '{"question":"'"$q"'"}'
@@ -232,19 +264,22 @@ ck "oversize file (2MB > USER_UPLOAD_MAX_MB=1) -> 413" "413" "$(up alice "$TMP/f
 ck "413 left no row" "0" "$(psql "SELECT count(*) FROM documents WHERE display_name='oversize.txt'")"
 ck "upload A (0.8MB) -> 201" "201" "$(up alice "$TMP/f/a.txt" a.txt)"
 ck "upload B (0.9MB) -> 201 (total 1.7MB)" "201" "$(up alice "$TMP/f/b.txt" b.txt)"
-ck "upload C would breach the 2MB total -> 409" "409" "$(up alice "$TMP/f/c.txt" c.txt)"
-ckc "409 body names quota_total" '"quota_total"' "$(upbody alice "$TMP/f/c.txt" c.txt || true)"
+C_RES=$(upcb alice "$TMP/f/c.txt" c.txt)
+ck "upload C would breach the 2MB total -> 409" "409" "$(printf '%s' "$C_RES" | tail -1)"
+ckc "409 body names quota_total" '"quota_total"' "$(printf '%s' "$C_RES" | head -n -1)"
 ck "409 left no row (alice still has 2 docs)" "2" \
   "$(psql "SELECT count(*) FROM documents WHERE scope='private' AND owner_id='$(uid_of alice)'")"
 ck "upload D (3rd doc) -> 201" "201" "$(up alice "$TMP/f/d.txt" d.txt)"
-ck "upload E (4th doc > MAX_DOCS=3) -> 409" "409" "$(up alice "$TMP/f/e.txt" e.txt)"
-ckc "doc-count 409 body names quota_docs" '"quota_docs"' "$(upbody alice "$TMP/f/e.txt" e.txt || true)"
-ck "hourly window exhausted -> 429" "429" "$(up alice "$TMP/f/e.txt" e.txt)"
-RL_HDR=$(curl -si -o /dev/null --max-time 60 -b "$TMP/alice-jar" \
+E_RES=$(upcb alice "$TMP/f/e.txt" e.txt)
+ck "upload E (4th doc > MAX_DOCS=3) -> 409" "409" "$(printf '%s' "$E_RES" | tail -1)"
+ckc "doc-count 409 body names quota_docs" '"quota_docs"' "$(printf '%s' "$E_RES" | head -n -1)"
+RL_RAW=$(curl -si --max-time 60 -b "$TMP/alice-jar" \
   -X POST $BASE/api/documents -H "X-CSRF-Token: $(csrf_of alice)" \
-  -F "file=@$(cygpath -w "$TMP/f/e.txt");filename=e.txt" | grep -i '^retry-after' | tr -d '\r')
-ckc "429 carries Retry-After" "retry-after" "$RL_HDR"
+  -F "file=@$(cygpath -w "$TMP/f/e.txt");filename=e.txt" | tr -d '\r')
+ck "hourly window exhausted -> 429" "429" "$(printf '%s\n%s' "$RL_RAW" | grep -i '^HTTP/' | tail -1 | awk '{print $2}')"
+ckc "429 carries Retry-After" "retry-after" "$RL_RAW"
 ck "ADMIN EXEMPT: 2MB private file -> 201" "201" "$(up g2aboss "$TMP/f/oversize.txt" admin-big.txt)"
+DOCIDS="$DOCIDS $(psql "SELECT string_agg(id::text, ' ') FROM documents WHERE scope='private' AND owner_id='$(uid_of alice)'")"
 DOCIDS="$DOCIDS $(psql "SELECT string_agg(id::text, ' ') FROM documents WHERE scope='private' AND owner_id='$(uid_of g2aboss)'")"
 
 # ===== CHECK 2: two users, same filename =======================================
@@ -270,20 +305,29 @@ ckn "bob's listing never shows carol's doc id" "$CAROL_DOC" \
 note "CHECK 3: corrupt docx and zip-bomb docx (real subprocess parse) -> 422"
 ck "corrupt docx -> 422 (child parse failure)" "422" "$(up dave "$TMP/f/corrupt.docx" corrupt.docx)"
 ck "zip-bomb docx (300MB declared) -> 422 (pre-parse guard)" "422" "$(up dave "$TMP/f/bomb.docx" bomb.docx)"
-ck "no row survived either failure (dave has 0 docs)" "0" \
-  "$(psql "SELECT count(*) FROM documents WHERE owner_id='$(uid_of dave)'")"
+# the S2/B4 contract: parse failures leave the row marked "failed" —
+# what must never exist is an INDEXED row for unparseable content
+ck "no INDEXED row survived either failure" "0" \
+  "$(psql "SELECT count(*) FROM documents WHERE owner_id='$(uid_of dave)' AND status='indexed'")"
+ck "both failures left failed rows" "2" \
+  "$(psql "SELECT count(*) FROM documents WHERE owner_id='$(uid_of dave)' AND status='failed'")"
 
 # ===== CHECK 4: parallel-upload race against the total quota ===================
 note "CHECK 4: 4 parallel 0.8MB uploads by erin vs the 2MB total quota"
 rm -f "$TMP/race-codes"
 for i in 1 2 3 4; do
-  ( curl -s -o /dev/null -w '%{http_code}\n' --max-time 120 -b "$TMP/erin-jar" \
+  ( sleep 0.4
+    curl -sS --retry 3 --retry-connrefused --retry-delay 1 -o /dev/null \
+      -w '%{http_code}\n' --max-time 180 -b "$TMP/erin-jar" \
       -X POST $BASE/api/documents -H "X-CSRF-Token: $(csrf_of erin)" \
-      -F "file=@$(cygpath -w "$TMP/f/p.txt");filename=p$i.txt" >> "$TMP/race-codes" ) &
+      -F "file=@$(cygpath -w "$TMP/f/p.txt");filename=p$i.txt" > "$TMP/race-code-$i" 2>> "$TMP/race-err"
+    echo "curl-$i exit=$?" >> "$TMP/race-err" ) &
 done
 wait
+cat "$TMP"/race-code-* > "$TMP/race-codes" 2>/dev/null
 RACE_CODES=$(tr '\n' ' ' < "$TMP/race-codes")
 echo "      parallel codes: $RACE_CODES"
+[ -s "$TMP/race-err" ] && echo "      race stderr: $(tail -3 "$TMP/race-err")"
 N201=$(printf '%s' "$RACE_CODES" | grep -o 201 | wc -l | tr -d ' ')
 N409=$(printf '%s' "$RACE_CODES" | grep -o 409 | wc -l | tr -d ' ')
 ck "race mixed 201s and 409s" "mixed" \
@@ -299,7 +343,7 @@ PRIV_UP=$(upbody bob "$TMP/f/bob-private.txt" "bob-private.txt")
 ckc "bob's private upload ok" '"scope":"private"' "$PRIV_UP"
 PRIV_DOC=$(printf '%s' "$PRIV_UP" | jsonget document_id)
 DOCIDS="$DOCIDS $PRIV_DOC"
-PRIV_IDS=$(vec_ids_for "$PRIV_DOC")
+PRIV_IDS=$(vec_ids_for "$PRIV_DOC" "$TMP/f/bob-private.txt")
 ck "private doc has exact vector ids" ">=1" \
   "$([ "$(printf '%s' "$PRIV_IDS" | wc -w)" -ge 1 ] && echo ">=1" || echo 0)"
 ACL_PROBE=$(dc exec -i $APP python -c "
@@ -320,9 +364,10 @@ ck "carol gets 404 on bob's private doc" "404" \
 ckn "carol's LISTING never shows bob's private doc" "bob-private" \
   "$(curl -s -b "$TMP/carol-jar" $BASE/api/documents)"
 
-ORG_UP=$(upbody g2aboss "$TMP/f/org-note.txt" "org-note.txt")
-ckc "admin org upload ok" '"scope":"org"' "$ORG_UP"
-ORG_DOC=$(printf '%s' "$ORG_UP" | jsonget document_id)
+ORG_RES=$(admin_upload "$TMP/f/org-note.txt" "org-note.txt")
+ck "admin org upload (org endpoint) -> 201" "201" "$(printf '%s' "$ORG_RES" | tail -1)"
+ORG_DOC=$(printf '%s' "$ORG_RES" | head -n -1 | jsonget document_id)
+ck "org note is scope=org in the DB" "org"   "$(psql "SELECT scope FROM documents WHERE id='$ORG_DOC'")"
 DOCIDS="$DOCIDS $ORG_DOC"
 
 note "CHECK 5b: the full chat path ($CONVS conversations so far — budget 4)"
@@ -367,8 +412,13 @@ RAGV2_AFTER=$(ragv2_ids)
 ck "rag-v2 ids unchanged across the whole run" "$RAGV2_BEFORE" "$RAGV2_AFTER"
 
 echo "=============================================================="
+if [ "$FAIL" -gt 0 ]; then
+  echo "--- app log (ASGI exception frames, for diagnosis) ---"
+  docker logs $APP 2>&1 | awk '/Exception in ASGI/{f=1} f' | grep -E 'File "/app|Error' | head -12
+fi
+echo "=============================================================="
 echo "RESULT: PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED  ($(date -u '+%Y-%m-%d %H:%M:%SZ'))"
 echo "NOTE: Pinecone writes confined to $NS; trap deletes tracked doc vectors by id."
-echo "NOTE: chat conversations used: $CONVS (budget 4)."
+echo "NOTE: chat conversations used: $(ls "$TMP"/conv-* 2>/dev/null | wc -l | tr -d ' ') (budget 4)."
 echo "=============================================================="
 [ "$FAIL" -eq 0 ]
