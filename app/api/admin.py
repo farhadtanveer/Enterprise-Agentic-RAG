@@ -19,7 +19,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as sa_delete
+from sqlalchemy import and_ as sa_and
 from sqlalchemy import func, select
+from sqlalchemy import or_ as sa_or
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
@@ -281,6 +283,11 @@ def purge_private_documents(
 # --- documents ------------------------------------------------------------------
 
 
+# C4/DECISION #1 + A14.6: the "over or NEAR quota" threshold on either
+# personal-quota axis (bytes, doc count).
+NEAR_QUOTA_RATIO = 0.8
+
+
 @router.get("/documents")
 def list_documents(
     response: Response,
@@ -289,13 +296,14 @@ def list_documents(
     admin: User = Depends(require_admin),
     db: DBSession = Depends(get_db),
 ) -> dict:
-    """C4/DECISION #1: ORG documents per-document (meta only). Private
-    documents NEVER appear here — not their rows, not their filenames.
-    Private volume is served by aggregates + the near-quota list (groups
-    phase); this endpoint counts private docs only as a total."""
+    """C4/DECISION #1 (A5): ORG and GROUP documents per-document (meta
+    only). Private documents NEVER appear here — no rows, no filenames
+    (a filename is itself a leak), not even existence. Private volume is
+    served by SYSTEM-WIDE aggregates suppressed below 5 users (D3) plus
+    the enforcement-relevant list of users over or NEAR quota."""
     q = (
         select(Document)
-        .where(Document.scope == "org")
+        .where(sa_or(Document.scope == "org", Document.scope == "group"))
         .order_by(Document.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -304,12 +312,67 @@ def list_documents(
     total_org = db.execute(
         select(func.count()).select_from(Document).where(Document.scope == "org")
     ).scalar_one()
+    total_group = db.execute(
+        select(func.count()).select_from(Document).where(Document.scope == "group")
+    ).scalar_one()
     total_private = db.execute(
         select(func.count()).select_from(Document).where(Document.scope == "private")
     ).scalar_one()
+
+    # --- private aggregates (D3: suppressed below 5 distinct owners) -------
+    private_aggregates = None
+    distinct_owners = db.execute(
+        select(func.count(func.distinct(Document.owner_id)))
+        .select_from(Document)
+        .where(Document.scope == "private")
+    ).scalar_one()
+    if distinct_owners >= 5:
+        priv_total_docs, priv_total_bytes = db.execute(
+            select(func.count(), func.coalesce(func.sum(Document.size_bytes), 0))
+            .select_from(Document)
+            .where(Document.scope == "private")
+        ).one()
+        private_aggregates = {
+            "users": distinct_owners,
+            "total_docs": priv_total_docs,
+            "total_bytes": int(priv_total_bytes),
+        }
+
+    # --- users over or NEAR quota (the enforcement view, per A14.6) --------
+    near_quota_users = []
+    if total_private > 0:
+        settings = get_settings()
+        per_user = db.execute(
+            select(
+                Document.owner_id,
+                func.count().label("docs"),
+                func.coalesce(func.sum(Document.size_bytes), 0).label("bytes"),
+            )
+            .where(Document.scope == "private")
+            .group_by(Document.owner_id)
+        ).all()
+        max_bytes = settings.user_upload_total_mb * 1024 * 1024
+        max_docs = settings.user_upload_max_docs
+        for owner_id, docs, nbytes in per_user:
+            if owner_id is None:
+                continue
+            near_bytes = max_bytes > 0 and int(nbytes) >= NEAR_QUOTA_RATIO * max_bytes
+            near_docs = max_docs > 0 and docs >= NEAR_QUOTA_RATIO * max_docs
+            if not (near_bytes or near_docs):
+                continue
+            u = db.get(User, owner_id)
+            near_quota_users.append({
+                "user_id": str(owner_id),
+                "username": u.username if u else None,
+                "private_docs": docs,
+                "private_bytes": int(nbytes),
+            })
+        near_quota_users.sort(key=lambda x: x["private_bytes"], reverse=True)
+
     items = [
         {
             "id": str(d.id),
+            "scope": d.scope,
             "display_name": d.display_name,
             "status": d.status,
             "size_bytes": d.size_bytes,
@@ -322,7 +385,10 @@ def list_documents(
     return {
         "items": items,
         "total_org": total_org,
+        "total_group": total_group,
         "private_documents_total": total_private,  # count only — never rows
+        "private_aggregates": private_aggregates,  # null below 5 users (D3)
+        "near_quota_users": near_quota_users,
     }
 
 
