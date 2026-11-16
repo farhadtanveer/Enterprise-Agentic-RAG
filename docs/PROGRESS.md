@@ -356,3 +356,24 @@ All pushed to `origin/backend/multi-user` through `8201cc5`.
 **G1 (docs/tasks/g1.md PART 1) COMPLETE — STOP and report to Farhad.**
 Wait for his review of G1 before ANY further work. Do NOT start G2
 (user-facing uploads, quotas, share flow, citations — his explicit rule).
+
+## 2026-11-16 — G2 PART 0 COMPLETE (H7–H13; docs/tasks/g2.md)
+
+| Step | Commit | Proven by |
+|---|---|---|
+| H7 settings audit — 4 decorative fields REMOVED (sample_kb_dir + dead ingest_sample_kb.py, pinecone_test_namespace, conversation_retention_days, test_database_url); reference test w/ empty allowlist + effect tests for app_name / chat_rate_limit / tavily_key | `9e2d0c9` | RED first (audit names exactly the 4); suite 301 compose AND CI-mode |
+| H8 hermetic suite — conftest pins every relied-on setting incl. DATABASE_URL sentinel + 4 caps; poisoned-env + empty-env + .env-present proof trio | `f721439` | Poisoned run found 20 real .env deps (MAX_MESSAGE_LENGTH=7 etc.) → pinned, never test-weakened; 302/302/302 |
+| H9 verify scripts pin WEB_FALLBACK=false + test namespace (b2/b3 previously NONE — chat read rag-v2!); rag-v2 compared by EXACT ids before/after in all six | `f238a71` | b5.sh 13/0/0, b2.sh 73/0/0 live (2 LLM calls disclosed); b2 run 1 exposed stale host-env OPENAI guard → fixed |
+| H10 operator CLI delete-document <id> (§A9.1, idempotent, audited) — NOT run on real data | `b430da2` | 7 tests red-first; ordering spy proves row-in-'deleting' at vector-delete time |
+| H11 last-admin race on DELETE paths (admin delete-user, DELETE /api/me) + production-hook grep | `42f1652` | 40/40 RED on unlocked mutant, 60/60 green locked; suite 349; grep: 1 production-legitimate sleep, 0 test hooks |
+| H12 members surface exposes added_by (DECISION #4 visibility) | `eec8e60` | red KeyError → one-line route fix; suite 350 |
+| H13 archived-group semantics pinned in §A14.3 (nobody until re-activation; RESTRICT unchanged) | `dc1c90b` | docs-only; behavior already in G1.2 code + tests |
+
+Evidence: docs/evidence/g2-part0-evidence.md. Suite now **350 passed / 0 failed**.
+
+## EXACT NEXT STEP
+
+G2 PART A (user-facing uploads): A1 documents API → A2 race-safe quotas →
+A3 parser subprocess + ingest concurrency → A4 storage-rule inheritance →
+A5 admin listing (C4 + near-quota) → A6 route gates → live g2a.sh →
+mutation re-test → STOP and report to Farhad.
