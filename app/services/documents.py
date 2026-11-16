@@ -18,11 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session as DBSession
 
 from app.core.config import get_settings
 from app.models.document import Document
+from app.models.user import User
 from app.services.audit_events import record_event
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,43 @@ logger = logging.getLogger(__name__)
 
 class UploadTooLarge(Exception):
     """Raised mid-stream when the byte cap is exceeded (maps to 413)."""
+
+
+class QuotaExceeded(Exception):
+    """Personal upload quota would be overshot (§A14.6, DECISION #7).
+
+    kind is 'total' (bytes) or 'docs' (count) — the route maps both to 409
+    with a machine-readable code. Admins never reach this (exempt)."""
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        super().__init__(kind)
+
+
+def enforce_private_quota(db: DBSession, user_id, incoming_size: int) -> None:
+    """Race-safe personal-quota gate for PRIVATE uploads (§A14.6 order 2+3).
+
+    Locks the caller's USER ROW (SELECT ... FOR UPDATE) so parallel uploads
+    by the same user SERIALIZE here: the second request blocks until the
+    first transaction commits, then re-reads the committed sizes/counts —
+    oversubscription is impossible (proven by the multi-thread race in
+    tests/security/test_upload_quota_race.py). Raises QuotaExceeded
+    ('total' then 'docs', §A14.6 order); must run INSIDE the transaction
+    that inserts the new document row so the lock covers the decision.
+    """
+    settings = get_settings()
+    db.execute(
+        select(User.id).where(User.id == user_id).with_for_update()
+    ).scalar_one()
+    total, count = db.execute(
+        select(func.coalesce(func.sum(Document.size_bytes), 0), func.count())
+        .select_from(Document)
+        .where(Document.scope == "private", Document.owner_id == user_id)
+    ).one()
+    if int(total) + incoming_size > settings.user_upload_total_mb * 1024 * 1024:
+        raise QuotaExceeded("total")
+    if count + 1 > settings.user_upload_max_docs:
+        raise QuotaExceeded("docs")
 
 
 def create_document(
@@ -85,7 +123,8 @@ class UploadRejected(Exception):
 
 
 def save_upload_stream(
-    fileobj, *, dest_dir: Path, storage_name: str, chunk_validator=None
+    fileobj, *, dest_dir: Path, storage_name: str, chunk_validator=None,
+    max_mb: int | None = None,
 ) -> tuple[Path, int, str]:
     """Stream the upload to ``dest_dir/<storage_name>`` under the byte cap.
 
@@ -98,9 +137,10 @@ def save_upload_stream(
     F6: ``chunk_validator`` (optional) inspects every chunk as it streams —
     e.g. the text NUL/UTF-8 contract — so rejected content never lands.
 
-    Enforces MAX_UPLOAD_MB while streaming (a lying Content-Length can't
-    blow past it); removes the partial file on any failure. Returns
-    (path, size_bytes, sha256 checksum).
+    Enforces the byte cap while streaming (a lying Content-Length can't
+    blow past it): ``max_mb`` overrides the global MAX_UPLOAD_MB (the
+    per-file personal quota, §A14.6); removes the partial file on any
+    failure. Returns (path, size_bytes, sha256 checksum).
     """
     if (
         not storage_name
@@ -113,7 +153,7 @@ def save_upload_stream(
         or Path(storage_name).name != storage_name
     ):
         raise UploadRejected(f"storage_name must be a plain basename, got {storage_name!r}")
-    max_bytes = get_settings().max_upload_mb * 1024 * 1024
+    max_bytes = (max_mb if max_mb is not None else get_settings().max_upload_mb) * 1024 * 1024
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / storage_name
     if dest.is_symlink() or dest.exists():
@@ -127,7 +167,7 @@ def save_upload_stream(
                 size += len(chunk)
                 if size > max_bytes:
                     raise UploadTooLarge(
-                        f"upload exceeds MAX_UPLOAD_MB={get_settings().max_upload_mb}"
+                        f"upload exceeds the per-file cap of {max_bytes // (1024 * 1024)}MB"
                     )
                 if chunk_validator is not None:
                     chunk_validator(chunk)

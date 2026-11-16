@@ -20,7 +20,7 @@ this route — the upload contract (201 + document_id) does not change.
 """
 import logging
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,11 +47,17 @@ from app.services.ingestion import (
     make_text_validator,
     SUPPORTED,
 )
+from app.services.ratelimit import SlidingWindowLimiter
 from app.services.validation import display_name_problems
 
 router = APIRouter(prefix="/api", tags=["documents"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
+# §A14.6 order 4: per-user sliding window on uploads (admins exempt) —
+# the same limiter class as chat/login, keyed on the user id.
+upload_limiter = SlidingWindowLimiter(
+    settings.user_uploads_per_hour, window_seconds=3600.0
+)
 
 
 class DocumentPatch(BaseModel):
@@ -161,9 +167,26 @@ async def upload_document(
         raise HTTPException(
             status_code=415, detail="File content does not match the claimed type"
         )
-    max_bytes = settings.max_upload_mb * 1024 * 1024
-    if file.size is not None and file.size > max_bytes:
-        raise HTTPException(status_code=413, detail="File exceeds MAX_UPLOAD_MB")
+
+    # --- quotas (§A14.6, DECISION #7) — admins are EXEMPT -------------------
+    is_admin = user.role == "admin"
+    cap_mb = settings.max_upload_mb if is_admin else min(
+        settings.max_upload_mb, settings.user_upload_max_mb
+    )
+    max_bytes = cap_mb * 1024 * 1024
+    if file.size is not None and file.size > max_bytes:  # order 1: per file
+        detail = (
+            "File exceeds MAX_UPLOAD_MB" if is_admin
+            else "File exceeds USER_UPLOAD_MAX_MB"
+        )
+        raise HTTPException(status_code=413, detail=detail)
+    if not is_admin and settings.user_uploads_per_hour > 0:  # order 4
+        if not upload_limiter.allow(str(user.id)):
+            raise HTTPException(
+                status_code=429,
+                detail={"code": "rate_limited"},
+                headers={"Retry-After": str(int(upload_limiter.window))},
+            )
 
     scope, owner_id, group_uuid = "private", user.id, None
     if group_id is not None:
@@ -187,36 +210,66 @@ async def upload_document(
             raise HTTPException(status_code=403, detail="Editor role required")
         scope, owner_id = "group", None  # C2: group documents are OWNERLESS
 
-    doc = documents_service.create_document(
-        db, scope=scope, owner_id=owner_id,
-        group_id=group_uuid, uploaded_by=user.id,
-        display_name=display_name, storage_path="", checksum="", size_bytes=0,
-        mime_suffix=suffix or None,
-    )
+    # Stream to a SERVER-GENERATED staging file first (F1 rules hold: pure
+    # basename inside upload_dir, exclusive create, per-file cap enforced
+    # mid-stream). The document row is only created inside the locked
+    # quota transaction below — a rejected upload leaves NO row.
+    part_path, size, checksum = None, 0, ""
     try:
-        dest, size, checksum = documents_service.save_upload_stream(
-            file.file, dest_dir=Path(settings.upload_dir) / str(doc.id),
-            storage_name=f"{doc.id}{suffix}",  # F1: server-generated
+        part_path, size, checksum = documents_service.save_upload_stream(
+            file.file, dest_dir=Path(settings.upload_dir) / ".incoming",
+            storage_name=f"{uuid4().hex}.part",
             chunk_validator=make_text_validator() if suffix in {".txt", ".md"} else None,
+            max_mb=cap_mb,
         )
     except documents_service.UploadTooLarge:
-        db.rollback()
-        raise HTTPException(status_code=413, detail="File exceeds MAX_UPLOAD_MB") from None
+        raise HTTPException(
+            status_code=413,
+            detail="File exceeds MAX_UPLOAD_MB" if is_admin
+            else "File exceeds USER_UPLOAD_MAX_MB",
+        ) from None
     except documents_service.UploadRejected:
-        db.rollback()
         raise HTTPException(status_code=422, detail="Invalid storage name") from None
     except ContentRejected:
-        db.rollback()
         raise HTTPException(
             status_code=422,
             detail="Text upload must be valid UTF-8 without NUL bytes",
         ) from None
-    doc.storage_path = str(dest)
-    doc.size_bytes = size
-    doc.checksum = checksum
-    db.flush()
+
+    # Locked quota TX (order 2+3): the caller's user row is locked FOR
+    # UPDATE so parallel uploads serialize — the second request re-reads
+    # the first one's COMMITTED sizes before deciding (race proven by
+    # tests/security/test_upload_quota_race.py). The row insert + the
+    # staging-file rename happen INSIDE this transaction.
     try:
-        loaded = load_file(dest)
+        if scope == "private" and not is_admin:
+            documents_service.enforce_private_quota(db, user.id, size)
+        doc = documents_service.create_document(
+            db, scope=scope, owner_id=owner_id,
+            group_id=group_uuid, uploaded_by=user.id,
+            display_name=display_name, storage_path="", checksum="",
+            size_bytes=size, mime_suffix=suffix or None,
+        )
+        final_dir = Path(settings.upload_dir) / str(doc.id)
+        final_dir.mkdir(parents=True, exist_ok=True)
+        final_path = final_dir / f"{doc.id}{suffix}"
+        part_path.replace(final_path)  # bytes are already on disk
+        doc.storage_path = str(final_path)
+        doc.checksum = checksum
+        db.commit()  # releases the row lock
+    except documents_service.QuotaExceeded as qe:
+        part_path.unlink(missing_ok=True)  # our own staging file only
+        db.rollback()
+        raise HTTPException(
+            status_code=409, detail={"code": f"quota_{qe.kind}"}
+        ) from None
+    except Exception:
+        part_path.unlink(missing_ok=True)
+        db.rollback()
+        raise
+
+    try:
+        loaded = load_file(final_path)
         chunks = chunk_documents(loaded)
     except Exception as exc:
         documents_service.mark_failed(db, doc, "unparseable")

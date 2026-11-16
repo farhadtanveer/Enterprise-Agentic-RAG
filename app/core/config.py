@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     # accepts external search.
     enable_web_fallback: bool = False
     max_upload_mb: int = 25  # 413 beyond this; enforced while streaming
+    # --- G2 A2 personal upload quotas (§A14.6, DECISION #7) ---
+    # Enforcement order: per-file (413) → total bytes (409 quota_total) →
+    # document count (409 quota_docs) → hourly window (429 + Retry-After).
+    # Admins are EXEMPT from all four (org uploads are their job); the
+    # global MAX_UPLOAD_MB above still binds everyone.
+    user_upload_max_mb: int = 25  # per file, ≤ max_upload_mb
+    user_upload_total_mb: int = 250  # per user across their PRIVATE docs
+    user_upload_max_docs: int = 50  # per user, private docs
+    user_uploads_per_hour: int = 10  # per-user sliding window on uploads
     # --- B2 login protection (docs/backend-design.md §A3/§A5) ---
     # Per-IP sliding window on POST /api/auth/login (0 = off).
     login_rate_limit_per_minute: int = 10

@@ -108,6 +108,16 @@ def test_chat_rate_limit_setting_feeds_the_legacy_chat_limiter():
     assert routes.chat_limiter.limit == s.chat_rate_limit_per_minute
 
 
+def test_upload_rate_setting_feeds_the_documents_upload_limiter():
+    """A2 (§A14.6 order 4): the hourly upload limiter is built FROM the
+    setting, with the one-hour window."""
+    import app.api.documents as doc_api
+
+    s = get_settings()
+    assert doc_api.upload_limiter.limit == s.user_uploads_per_hour
+    assert doc_api.upload_limiter.window == 3600.0
+
+
 def test_empty_tavily_key_refuses_tool_construction(monkeypatch):
     import app.rag.workflow as wf
 
