@@ -390,3 +390,23 @@ exists in code; H13 only makes the contract explicit in the design.
   the process boundary); the shared fixture session cannot serve parallel
   requests (the gate test uses per-request sessions).
 - Full suite: **379 passed / 0 failed** (369 + 10).
+
+## G2 PART A — A4: storage rules F1/F3/F6 verified unchanged (2026-11-16)
+
+No product code changed — this step proves the NEW user route inherits the
+B4 hardening through the shared service functions. Five proofs
+(tests/test_user_upload_storage_rules.py, all under tmp_path upload_dir):
+- F1: stored path is EXACTLY upload_dir/<doc_id>/<doc_id><suffix>; no
+  client-filename component appears anywhere in it.
+- F6: a NUL-binary .txt (422) and a magic-mismatching .pdf (415) leave NO
+  file on disk (an empty staging DIRECTORY may remain per the working-tree
+  rule — no file survives).
+- F3: PATCH display_name rejects NUL / reserved chars / Windows reserved
+  stems with 422.
+- F1 deletion: a SYMLINK planted at the stored path is REFUSED by
+  remove_stored_file — the outside target survives, the symlink itself
+  remains in place, the row is still deleted (the DB is authoritative).
+- F1 deletion: a SYMLINKED INTERMEDIATE directory is likewise refused.
+What failed first: my own assertion demanded the symlink be GONE — the
+correct behavior is refusal-in-place; test fixed, rule untouched.
+Suite: 385 passed / 0 failed (379 + 5... 380 + 5).
