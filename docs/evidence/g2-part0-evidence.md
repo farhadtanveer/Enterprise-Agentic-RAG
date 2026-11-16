@@ -185,3 +185,28 @@ Real-LLM spend this step: TWO calls (one b5 chat, one b2 chat), disclosed.
 to Farhad; the file is gone from `data/` as of 2026-11-16 (his action — this
 session never touches it). Nothing in the app can recreate it (CHECK 1+2
 prove that again in the same run).
+
+## H10 — operator CLI `delete-document <id>` (2026-11-16)
+
+- `app/cli.py` gains the command: parse UUID (garbage → ClickException),
+  unknown id → "nothing to do" exit 0 (IDEMPOTENT), otherwise the §A9.1
+  sequence: TX1 `begin_delete` (row visible 'deleting') → COMMIT →
+  idempotent `delete_document_vectors` (outside TX) → TX2 `complete_delete`
+  (row + `document_deleted` audit with actor NULL + stored-file removal via
+  the F1-hardened `remove_stored_file`). A Pinecone outage leaves the row
+  'deleting' for `documents-retry-deleting` — the same recoverable shape as
+  the admin route.
+- Tests FIRST: `tests/test_cli_delete_document.py` was RED (7 errors —
+  command absent) before the implementation. Now 7 green:
+  vectors-then-row ordering (spied delete asserts the row EXISTS in status
+  'deleting' at vector-delete time), row+file removal (tmp_path
+  upload_dir only), idempotency (second run "nothing to do", vectors
+  touched once), unknown id noop, non-UUID rejection, audit row (actor
+  NULL, no filename in details), stuck-in-'deleting' completion.
+- Test-side lessons (reported, no product impact): the caller session's
+  identity map raises ObjectDeletedError on expired-instance attribute
+  access after another session deletes the row — the assertions use fresh
+  SELECTs with pre-captured ids.
+- NOT RUN against real data: the mandate reserves the bad%00name.txt
+  orphan row for Farhad. The only executions were the tests (tmp_path).
+- Full suite: 309 passed / 0 failed (302 + 7).

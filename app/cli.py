@@ -305,5 +305,37 @@ def documents_retry_deleting() -> None:
         db.close()
 
 
+@cli.command("delete-document")
+@click.argument("document_id")
+def delete_document(document_id: str) -> None:
+    """Operator deletion of ONE document (§A9.1): vectors first, then the
+    row + stored file. IDEMPOTENT — an unknown or already-deleted id is a
+    successful no-op; a Pinecone outage leaves the row 'deleting' for
+    documents-retry-deleting. Audited (document_deleted, CLI actor None)."""
+    from uuid import UUID as UUIDType
+
+    from app.rag.vectorstore import delete_document_vectors
+    from app.services import documents as docs_service
+
+    try:
+        doc_uuid = UUIDType(document_id)
+    except ValueError:
+        raise click.ClickException(f"Not a document id: {document_id}") from None
+    db = _session()
+    try:
+        doc = docs_service.get_document(db, doc_uuid)
+        if doc is None:
+            click.echo(f"No document {doc_uuid} — nothing to do.")
+            return
+        docs_service.begin_delete(db, doc)
+        db.commit()  # TX1: visible 'deleting' before any vector work
+        delete_document_vectors(str(doc.id))  # idempotent, outside TX
+        docs_service.complete_delete(db, doc.id, actor_user_id=None)
+        db.commit()  # TX2: row + audit + stored file
+        click.echo(f"Deleted document {doc_uuid} (vectors, row, stored file).")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     cli()
