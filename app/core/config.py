@@ -57,6 +57,22 @@ class Settings(BaseSettings):
     user_upload_total_mb: int = 250  # per user across their PRIVATE docs
     user_upload_max_docs: int = 50  # per user, private docs
     user_uploads_per_hour: int = 10  # per-user sliding window on uploads
+    # --- G2 A3 parser subprocess limits (§A14.6, DECISION #8) ---
+    # The parser runs in a spawned subprocess: a poisoned file can kill the
+    # CHILD, never the app. Any child failure (timeout, kill, cap refusal)
+    # maps to the generic 422 "File could not be parsed".
+    parser_timeout_seconds: int = 60  # hard wall-clock deadline per parse
+    # Child RLIMIT_AS (POSIX; skipped elsewhere). 1GB, not less: the limit
+    # counts MAPPED address space (imported native libs included), and a
+    # live PyPDFLoader run needs real headroom above that. Still bounds any
+    # runaway decompression far below what a 25MB upload could expand to.
+    parser_max_memory_mb: int = 1024
+    parser_max_pages: int = 500  # parsed pages/sections kept per document
+    parser_max_chars: int = 2000000  # extracted characters kept per document
+    parser_max_docx_uncompressed_mb: int = 200  # zip-bomb guard, checked pre-parse
+    # Global ingest concurrency (DECISION #7 addition): caps simultaneous
+    # parse/embed runs so N parallel uploads cannot starve the process.
+    ingest_concurrency: int = 2
     # --- B2 login protection (docs/backend-design.md §A3/§A5) ---
     # Per-IP sliding window on POST /api/auth/login (0 = off).
     login_rate_limit_per_minute: int = 10

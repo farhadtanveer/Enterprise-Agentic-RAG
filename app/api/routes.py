@@ -12,6 +12,7 @@ from app.services import documents as documents_service
 from app.services.ingestion import (
     ContentRejected,
     content_matches_suffix,
+    ingest_gate,
     load_file,
     chunk_documents,
     make_text_validator,
@@ -156,37 +157,38 @@ async def ingest(
     # generic message). Everything downstream (the vector store) is
     # infrastructure — still the handled 500. Both keep the row marked
     # 'failed' and log the exception CLASS only (F4).
-    try:
-        loaded = load_file(dest)
-        chunks = chunk_documents(loaded)
-    except Exception as exc:
-        documents_service.mark_failed(db, doc, "unparseable")
-        record_event(
-            db, "document_uploaded", object_type="document", object_id=doc.id,
-            outcome="error", route="/api/ingest",
-            details={"scope": "org", "via": "legacy_ingest", "error_class": "unparseable"},
-        )
-        db.commit()
-        # parser errors can embed file content (e.g. XML fragments from a
-        # malformed docx) — log the class only, never the body (F4)
-        logger.error("legacy ingest failed: %s", type(exc).__name__)
-        raise HTTPException(
-            status_code=422, detail="File could not be parsed"
-        ) from None
-    try:
-        ids = add_documents(
-            chunks, doc_id=doc.id, scope="org", owner_id=None, source_name=display_name
-        )
-    except Exception as exc:
-        documents_service.mark_failed(db, doc, "ingest_failed")
-        record_event(
-            db, "document_uploaded", object_type="document", object_id=doc.id,
-            outcome="error", route="/api/ingest",
-            details={"scope": "org", "via": "legacy_ingest", "error_class": "ingest_failed"},
-        )
-        db.commit()
-        logger.error("legacy ingest failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=500, detail="Ingest failed") from None
+    with ingest_gate:  # DECISION #7: bounded parse/embed concurrency
+        try:
+            loaded = load_file(dest)
+            chunks = chunk_documents(loaded)
+        except Exception as exc:
+            documents_service.mark_failed(db, doc, "unparseable")
+            record_event(
+                db, "document_uploaded", object_type="document", object_id=doc.id,
+                outcome="error", route="/api/ingest",
+                details={"scope": "org", "via": "legacy_ingest", "error_class": "unparseable"},
+            )
+            db.commit()
+            # parser errors can embed file content (e.g. XML fragments from a
+            # malformed docx) — log the class only, never the body (F4)
+            logger.error("legacy ingest failed: %s", type(exc).__name__)
+            raise HTTPException(
+                status_code=422, detail="File could not be parsed"
+            ) from None
+        try:
+            ids = add_documents(
+                chunks, doc_id=doc.id, scope="org", owner_id=None, source_name=display_name
+            )
+        except Exception as exc:
+            documents_service.mark_failed(db, doc, "ingest_failed")
+            record_event(
+                db, "document_uploaded", object_type="document", object_id=doc.id,
+                outcome="error", route="/api/ingest",
+                details={"scope": "org", "via": "legacy_ingest", "error_class": "ingest_failed"},
+            )
+            db.commit()
+            logger.error("legacy ingest failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=500, detail="Ingest failed") from None
 
     documents_service.attach_ingest_result(db, doc, len(chunks))
     record_event(

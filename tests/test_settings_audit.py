@@ -118,6 +118,14 @@ def test_upload_rate_setting_feeds_the_documents_upload_limiter():
     assert doc_api.upload_limiter.window == 3600.0
 
 
+def test_ingest_concurrency_setting_feeds_the_ingest_gate():
+    """A3 (DECISION #7 addition): the global parse/embed gate is built
+    FROM the setting."""
+    from app.services.ingestion import ingest_gate
+
+    assert ingest_gate.limit == get_settings().ingest_concurrency
+
+
 def test_empty_tavily_key_refuses_tool_construction(monkeypatch):
     import app.rag.workflow as wf
 

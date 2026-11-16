@@ -39,6 +39,7 @@ from app.services.ingestion import (
     ContentRejected,
     chunk_documents,
     content_matches_suffix,
+    ingest_gate,
     load_file,
     make_text_validator,
     SUPPORTED,
@@ -379,34 +380,35 @@ async def upload_org_document(
     doc.size_bytes = size
     doc.checksum = checksum
     db.flush()
-    try:
-        loaded = load_file(dest)
-        chunks = chunk_documents(loaded)
-    except Exception as exc:
-        documents_service.mark_failed(db, doc, "unparseable")
-        record_event(
-            db, "document_uploaded", actor_user_id=admin.id,
-            object_type="document", object_id=doc.id,
-            outcome="error", route="/api/admin/documents",
-            details={"scope": "org", "error_class": "unparseable"},
-        )
-        db.commit()
-        logger.error("admin ingest failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=422, detail="File could not be parsed") from None
-    try:
-        add_documents(chunks, doc_id=doc.id, scope="org", owner_id=None,
-                      source_name=display_name)
-    except Exception as exc:
-        documents_service.mark_failed(db, doc, "ingest_failed")
-        record_event(
-            db, "document_uploaded", actor_user_id=admin.id,
-            object_type="document", object_id=doc.id,
-            outcome="error", route="/api/admin/documents",
-            details={"scope": "org", "error_class": "ingest_failed"},
-        )
-        db.commit()
-        logger.error("admin ingest failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=500, detail="Ingest failed") from None
+    with ingest_gate:  # DECISION #7: bounded parse/embed concurrency
+        try:
+            loaded = load_file(dest)
+            chunks = chunk_documents(loaded)
+        except Exception as exc:
+            documents_service.mark_failed(db, doc, "unparseable")
+            record_event(
+                db, "document_uploaded", actor_user_id=admin.id,
+                object_type="document", object_id=doc.id,
+                outcome="error", route="/api/admin/documents",
+                details={"scope": "org", "error_class": "unparseable"},
+            )
+            db.commit()
+            logger.error("admin ingest failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=422, detail="File could not be parsed") from None
+        try:
+            add_documents(chunks, doc_id=doc.id, scope="org", owner_id=None,
+                          source_name=display_name)
+        except Exception as exc:
+            documents_service.mark_failed(db, doc, "ingest_failed")
+            record_event(
+                db, "document_uploaded", actor_user_id=admin.id,
+                object_type="document", object_id=doc.id,
+                outcome="error", route="/api/admin/documents",
+                details={"scope": "org", "error_class": "ingest_failed"},
+            )
+            db.commit()
+            logger.error("admin ingest failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=500, detail="Ingest failed") from None
     documents_service.attach_ingest_result(db, doc, len(chunks))
     record_event(
         db, "document_uploaded", actor_user_id=admin.id,

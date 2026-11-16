@@ -355,3 +355,38 @@ exists in code; H13 only makes the contract explicit in the design.
   lesson recorded: commit BEFORE mutation runs (the g1 harness does this;
   the ad-hoc run here did not).
 - Suite: 369 passed / 0 failed.
+
+## G2 PART A — A3: parser subprocess + ingest concurrency (2026-11-16)
+
+- DECISION #8 implemented in `app/services/ingestion.py`: `load_file` now
+  runs the parse in a SPAWNED SUBPROCESS (`_spawn_and_collect`) with a hard
+  wall-clock timeout (PARSER_TIMEOUT_SECONDS=60) and a child RLIMIT_AS
+  (PARSER_MAX_MEMORY_MB=1024 — 512 was proven too tight live: the limit
+  counts mapped address space incl. native libs, and a real PyPDFLoader run
+  needs headroom; found by the pages-cap test, fixed by raising the
+  default). In-child caps: pages (PARSER_MAX_PAGES=500), extracted chars
+  (PARSER_MAX_CHARS=2M), and the DOCX ZIP-BOMB GUARD (sum of ZipInfo
+  file_size vs PARSER_MAX_DOCX_UNCOMPRESSED_MB=200) checked BEFORE any
+  decompression.
+- IPC is a Pipe, NOT a Queue — Queue.put spawns a feeder THREAD which a
+  tight RLIMIT_AS can refuse (found live: "can't start new thread" in the
+  child); Pipe.send runs on the calling thread.
+- ANY child failure (timeout kill, nonzero exit, no verdict, broken pipe,
+  cap refusal) → ParseFailed → the routes' existing generic 422 "File
+  could not be parsed" (S2 at scale; never 500, never parser text — the
+  child sends the exception CLASS only, logged class-only).
+- DECISION #7 addition: IngestGate (INGEST_CONCURRENCY=2) wraps
+  parse+embed in ALL THREE ingest routes (user, admin, legacy). Behavior
+  test: fake slow parse + 3 parallel uploads with gate=1 → observed
+  concurrency exactly 1.
+- Tests FIRST (tests/test_parser_subprocess.py, red ImportError): real
+  spawn round-trip; hang→timeout (parent survived <30s); crash→generic;
+  600MB bomber under 64MB RLIMIT → killed, parent alive; zip-bomb guard;
+  chars cap; pages cap; corrupt docx → ParseFailed; route maps
+  ParseFailed → 422 generic; gate serialization.
+- Environment findings (disclosed): spawn targets must be MODULE-LEVEL
+  (nested test functions cannot pickle); settings that must reach the
+  CHILD travel as ENV VARS (monkeypatched Settings objects do not cross
+  the process boundary); the shared fixture session cannot serve parallel
+  requests (the gate test uses per-request sessions).
+- Full suite: **379 passed / 0 failed** (369 + 10).
