@@ -377,3 +377,31 @@ G2 PART A (user-facing uploads): A1 documents API → A2 race-safe quotas →
 A3 parser subprocess + ingest concurrency → A4 storage-rule inheritance →
 A5 admin listing (C4 + near-quota) → A6 route gates → live g2a.sh →
 mutation re-test → STOP and report to Farhad.
+
+## 2026-11-16 — G2 PART A COMPLETE (docs/tasks/g2.md PART A)
+
+| Step | Commit | Proven by |
+|---|---|---|
+| A1 user documents API (5 routes: GET/POST /api/documents, GET/PATCH/DELETE /api/documents/{id}) | `c79e40c` | 12 tests red-first; two real catches (SQLAlchemy and/or leak of foreign private docs into listings — fixed with sa_or/sa_and; multipart NUL quirk); inventory +5; suite 362 both modes |
+| A2 race-safe quotas (413/409/409/429+Retry-After, admin exempt, USER_UPLOAD_* settings) | `458b19f` + `6b355ec` | locked user-row FOR UPDATE in the row-insert TX; 4-thread race test RED on the unlocked mutant; staging-file flow leaves no rows on rejection |
+| A3 parser subprocess (timeout, RLIMIT_AS, page/char caps, zip-bomb guard) + IngestGate | `a1f757c` | 10 tests red-first (spawn machinery, caps via env-crossed settings, gate serialization); Pipe not Queue (feeder thread refused under RLIMIT_AS — found live); wiring pins |
+| A4 F1/F3/F6 inheritance on the user route | `f0f8c60` | stored-name/server-generation, no files after rejection, symlink refusals with row removal |
+| A5 admin listing: org+group per-document, private aggregates k≥5, near-quota users | `1f57f6b` | red-first vs org-only listing; zero private filenames asserted against 6 owners; B6-era leak test unchanged |
+| A6 route gates + 404 sweep | `2f878c8` | inventory+gate landed with A1; unknown-id 404 on every verb |
+| behavior pins (no-move service surface, archived-group upload 404) | `64caba1` | A14.8 #5 + H13 write-path |
+| mutation re-test (quota/can_read/editor/subprocess) | `a2b7f92` | 13/13 KILLED final run; first-run M-P5 survivor was a harness-selection gap (wiring pin missing) — selection fixed, no product change |
+| **live g2a.sh** | `c90836a` + `da0731b` | **45 PASS / 0 FAIL / 0 SKIP**; 2 conversations (budget 4); rag-v2 unchanged by exact ids; legacy 27=27; found+fixed the REAL A3 pipe deadlock (>64KB verdicts, regression test added, suite 395 both modes) |
+
+Suite: **395 passed / 0 failed** in compose mode AND CI-mode.
+Evidence: docs/evidence/g2a-evidence.md, docs/review/g2a-mutation-report.md.
+Process lessons recorded: commit BEFORE mutation runs; concurrent >> appends
+under MSYS are unreliable (per-curl files); namespace-wide list+fetch does
+not scale (per-doc probes recompute exact chunk ids from the stored file).
+
+## EXACT NEXT STEP
+
+**G2 PART A COMPLETE — STOP and report to Farhad.** Wait for his review of
+Part A (quotas race-safety, parser subprocess limits, admin private-doc
+leak check) before ANY further work. PART B (share flow, versions,
+governance, citations) is his explicit go/no-go per docs/tasks/g2.md
+session 2.
