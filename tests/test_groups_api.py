@@ -409,3 +409,42 @@ def test_membership_audit_rows_carry_no_content(client, db_session):
         blob = str(e.details) + str(e.event_type)
         assert "audit-user" not in blob  # usernames of members are ids in details
         assert e.details.get("role") == "editor"
+
+
+def test_group_members_list_carries_added_by_and_added_at(client, db_session):
+    """H12 / DECISION #4: the members surface shows WHO added each member
+    and WHEN — an admin self-join is visible to the group's editors with
+    added_by == the admin themselves."""
+    acsrf = login(client, make(db_session, "h12-admin", role="admin").username)
+    editor = make(db_session, "h12-editor")
+    admin = db_session.execute(
+        select(User).where(User.username == "h12-admin")
+    ).scalar_one()
+    r = client.post("/api/admin/groups", json={"name": "h12-g"},
+                    headers={"X-CSRF-Token": acsrf})
+    assert r.status_code == 201, r.text
+    g = gid(db_session, "h12-g")
+    # admin promotes the user to EDITOR (that's what makes the list readable)
+    client.post(f"/api/admin/groups/{g}/members",
+                json={"username": "h12-editor", "role": "editor"},
+                headers={"X-CSRF-Token": acsrf})
+    # then the admin SELF-JOINS as a plain member (the DECISION #4 flow)
+    r = client.post(f"/api/admin/groups/{g}/members",
+                    json={"user_id": str(admin.id), "role": "member"},
+                    headers={"X-CSRF-Token": acsrf})
+    assert r.status_code == 201, r.text
+
+    ecsrf = login(client, "h12-editor")
+    r = client.get(f"/api/groups/{g}/members",
+                   headers={"X-CSRF-Token": ecsrf})
+    assert r.status_code == 200, r.text
+    items = {i["user_id"]: i for i in r.json()["items"]}
+
+    me = items[str(editor.id)]
+    assert me["added_by"] == str(admin.id)  # put in BY the admin
+    assert me["added_at"]  # ISO timestamp present
+
+    aj = items[str(admin.id)]
+    assert aj["added_by"] == str(admin.id)  # SELF-join: actor == target
+    assert aj["role"] == "member"
+    assert aj["added_at"]

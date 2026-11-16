@@ -257,3 +257,20 @@ grep -rn "sleep(" app/
 grep -rniE "test_hook|testing|monkeypatch|fake_|_test_|allow_test|skip_auth|backdoor" app/
   → (none) — zero test hooks in production code.
 ```
+
+## H12 — members surface carries added_by + added_at (2026-11-16)
+
+- FOUND: `GET /api/groups/{id}/members` returned `added_at` but NOT
+  `added_by` — the G1.1 schema stores `group_memberships.added_by` and the
+  service populates it, but the G1.4 route dropped it. DECISION #4 says an
+  admin self-join must be visible to the group's editors — "visible" means
+  WHO did it, not just WHEN.
+- Test FIRST (red): tests/test_groups_api.py::
+  test_group_members_list_carries_added_by_and_added_at — admin creates a
+  group, promotes an editor, SELF-JOINS as member; the editor lists members
+  and asserts added_by/added_at on both rows (editor: added_by == admin;
+  self-join row: added_by == admin == themselves).
+- Fix: the route now emits `"added_by": str(m.added_by) | None` — ids only,
+  no content (privacy rule intact).
+- Green: groups file 12 passed; full suite **350 passed / 0 failed**
+  (349 + 1).

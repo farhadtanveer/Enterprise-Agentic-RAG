@@ -76,6 +76,9 @@ def group_members(
             "user_id": str(m.user_id),
             "username": member_user.username if member_user else None,
             "role": m.role,
+            # DECISION #4 (H12): WHO put this member in — an admin self-join
+            # is visible to the group's editors with added_by == themselves.
+            "added_by": str(m.added_by) if m.added_by is not None else None,
             "added_at": m.added_at.isoformat(),
         })
     _no_store(response)
