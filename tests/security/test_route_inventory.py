@@ -130,6 +130,13 @@ def test_inventory_snapshot_matches_reviewed_allowlist():
         ("DELETE", "/api/admin/groups/{group_id}/members/{user_id}"),
         ("GET", "/api/me/groups"),
         ("GET", "/api/groups/{group_id}/members"),
+        # G2 A1 user-facing documents surface (reviewed addition; session
+        # auth via get_current_user on all five; audience rules inside)
+        ("GET", "/api/documents"),
+        ("POST", "/api/documents"),
+        ("GET", "/api/documents/{document_id}"),
+        ("PATCH", "/api/documents/{document_id}"),
+        ("DELETE", "/api/documents/{document_id}"),
     }
 
 

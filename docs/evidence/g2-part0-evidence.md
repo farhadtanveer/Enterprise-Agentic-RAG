@@ -287,3 +287,40 @@ implementation (DbAccessResolver: archived excluded from `audiences_for`,
 `can_read` False on inactive) and its proving test
 (tests/security/test_access_resolver.py, G1.2) — the behavior ALREADY
 exists in code; H13 only makes the contract explicit in the design.
+
+## G2 PART A — A1: user-facing documents API (2026-11-16)
+
+- NEW `app/api/documents.py` (5 routes, registered in main.py, route
+  inventory consciously extended +5 in the same commit): GET/POST
+  /api/documents, GET/PATCH/DELETE /api/documents/{id}.
+- Rules proven by `tests/test_documents_api.py` (12 tests, RED first —
+  ModuleNotFoundError before the router existed):
+  - anonymous 401 on all five; POST private → owned by caller (C2),
+    uploaded_by set, F1 server-generated stored name, strict
+    `user:<id>` vector token; POST group → editor-only (member 403,
+    outsider 404, ADMIN-NON-MEMBER 404 — no implicit access,
+    DECISION #4), ownerless row + group_id + uploaded_by; unknown
+    group 404; archived group 404.
+  - Listing is a SERVER-SIDE filter (org + own private + ACTIVE groups');
+    detail outside the audience 404; archived-group docs vanish from
+    listing AND detail.
+  - PATCH: display_name renames; scope/group keys → 422 (pydantic
+    extra=forbid — DECISION #3, no moves); member-non-editor 403;
+    admin-member-of-group 403 (C3), admin-non-member 404; org PATCH
+    admin-only (plain user 403).
+  - DELETE §A9.1 (spy asserts the row exists in 'deleting' at
+    vector-delete time); authz matrix: outsider 404, member 403, editor
+    200, owner 200, admin ANY (C3) audited.
+  - F3/F6 rejections (reserved-char 422 / wrong-type 400 / magic-mismatch
+    415 / NUL-text 422) leave NO document rows; audits carry scope+chunk
+    counts only — asserted no filename ever reaches audit_events.
+- What failed first (2 real catches by the tests):
+  1. the first listing filter used Python `and`/`|` on SQLAlchemy
+     column expressions — another user's PRIVATE document leaked into
+     the listing. Fixed with `sa_or`/`sa_and` (the test exists precisely
+     to catch this class of bug).
+  2. the route-level NUL-filename probe passed a NUL that multipart
+     transport delivers as a literal "%00" — the F3 validator (control
+     chars) can only be exercised directly; the route-level probe now
+     uses a reserved char (`bad|name.txt`) that survives transport.
+- Suite: **362 passed / 0 failed in compose mode AND CI-mode** (350 + 12).
