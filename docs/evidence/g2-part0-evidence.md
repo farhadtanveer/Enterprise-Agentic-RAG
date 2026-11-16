@@ -324,3 +324,34 @@ exists in code; H13 only makes the contract explicit in the design.
      chars) can only be exercised directly; the route-level probe now
      uses a reserved char (`bad|name.txt`) that survives transport.
 - Suite: **362 passed / 0 failed in compose mode AND CI-mode** (350 + 12).
+
+## G2 PART A — A2: race-safe quotas (2026-11-16, commit 458b19f)
+
+- Settings (§A14.6, DECISION #7, all read + wiring-proven):
+  USER_UPLOAD_MAX_MB=25, USER_UPLOAD_TOTAL_MB=250, USER_UPLOAD_MAX_DOCS=50,
+  USER_UPLOADS_PER_HOUR=10 (limiter built at import from the setting,
+  3600 s window — pinned in test_settings_audit.py). Admins exempt from
+  all four; global MAX_UPLOAD_MB binds everyone.
+- Race safety: enforce_private_quota locks the caller's USER ROW
+  (SELECT ... FOR UPDATE) INSIDE the transaction that inserts the doc row —
+  parallel uploads serialize; the loser re-reads the winner's COMMITTED
+  sizes and answers 409. POST /api/documents streams to a server-generated
+  `.incoming/<hex>.part` staging file FIRST (a rejected upload leaves no
+  row), then the locked TX checks quota + inserts the row + renames the
+  file into place, then parse/index run outside the lock.
+- Codes: per-file 413 (USER_UPLOAD_MAX_MB / MAX_UPLOAD_MB for admins),
+  409 {"code":"quota_total"}, 409 {"code":"quota_docs"},
+  429 {"code":"rate_limited"} + Retry-After.
+- RED-first: quota tests errored on the absent settings/functions; then
+  two real catches — (1) stale `dest` NameError after the staging
+  restructure (caught by every upload test), (2) the race test initially
+  exercised REAL add_documents (offline fakes made explicit).
+- MUTATION PROOF of the race test: with `with_for_update()` stripped from
+  enforce_private_quota the race test FAILS (oversubscription); green with
+  the lock. NOTE (disclosed): the first mutant run used
+  `git checkout -- app/services/documents.py` to restore, which also wiped
+  the then-UNCOMMITTED A2 service changes — restored by re-applying the
+  identical edits, suite re-verified green before committing. Process
+  lesson recorded: commit BEFORE mutation runs (the g1 harness does this;
+  the ad-hoc run here did not).
+- Suite: 369 passed / 0 failed.
