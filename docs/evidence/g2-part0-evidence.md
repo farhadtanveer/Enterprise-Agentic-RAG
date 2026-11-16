@@ -274,3 +274,16 @@ grep -rniE "test_hook|testing|monkeypatch|fake_|_test_|allow_test|skip_auth|back
   no content (privacy rule intact).
 - Green: groups file 12 passed; full suite **350 passed / 0 failed**
   (349 + 1).
+
+## H13 — archived-group semantics pinned in the design doc (2026-11-16)
+
+Docs-only commit. §A14.3 gains the pinned paragraph: archiving
+(`groups.is_active = false`) puts the group in NOBODY's audience — its
+documents are retrievable by nobody (members, editors, admins — DECISION #4
+leaves no implicit path) until re-activation; memberships are KEPT while
+archived (re-activation restores the same members); the delete-RESTRICT
+still applies while documents reference the group. Notes the fail-closed
+implementation (DbAccessResolver: archived excluded from `audiences_for`,
+`can_read` False on inactive) and its proving test
+(tests/security/test_access_resolver.py, G1.2) — the behavior ALREADY
+exists in code; H13 only makes the contract explicit in the design.

@@ -1151,6 +1151,18 @@ class AccessResolver(Protocol):
   legacy chat keeps the static `ORG_ONLY_FILTER`.
 - With DECISION #9 applied, the resolver accepts ONLY the prefixed token
   forms (`org`, `group:<id>`, `user:<id>`).
+- **Archived groups (H13, pinned 2026-11-16):** setting
+  `groups.is_active = false` (the archive action) puts the group in
+  NOBODY's audience — its documents are retrievable by **nobody** (not its
+  members, not its editors, not an admin — DECISION #4 leaves no implicit
+  path) until the group is re-activated. Membership rows are KEPT while
+  archived (re-activation restores access for the same members with no
+  re-adding). The delete rule is unaffected: deleting an archived group is
+  still RESTRICTed while any document references it — archive is the
+  reversible path, delete requires the documents to be gone. Implemented
+  fail-closed in `DbAccessResolver` (archived groups are excluded from
+  `audiences_for`; `can_read` answers False for an inactive group) and
+  proven by `tests/security/test_access_resolver.py`.
 
 ### A14.4 Data model changes and the Alembic plan (from the B4 schema)
 
