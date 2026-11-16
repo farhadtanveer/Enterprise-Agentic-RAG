@@ -130,3 +130,58 @@ actual final: 302 passed, 3 warnings in 91.31s     PASS
 `tests/test_settings_audit.py::test_suite_runs_on_the_hermetic_pins` asserts
 the pinned values through `get_settings()` — removing/renaming a conftest
 pin fails it, so the suite cannot silently start reading `.env` again.
+
+## H9 — verify-script env pins + rag-v2 before/after (2026-11-16)
+
+Mandate: pin `ENABLE_WEB_FALLBACK=false` and `PINECONE_NAMESPACE=multi-user-test`
+in EVERY `scripts/verify/*.sh` container (b2..g1); scripts must COMPARE rag-v2
+before/after (unchanged) rather than assume zero vectors.
+
+### Changes (all six scripts)
+
+- Pins added to every SERVING app container:
+  - b2.sh: 3 containers (main :8082, spray :8083, __Host- variant :8084) —
+    previously NONE pinned (the legacy chat queried rag-v2 by default!).
+  - b3.sh: 4 containers (main + two restarts + caps :8085).
+  - b4.sh/b5.sh/b6.sh: had `PINECONE_NAMESPACE=$NS`, gained
+    `ENABLE_WEB_FALLBACK=false`.
+  - g1.sh: already pinned both (the H4/G1 standard) — unchanged.
+  - Deliberate exception: b2's `rag-prod-refusal` one-shot container is NOT
+    pinned — its whole purpose is to prove the APP production validator
+    refuses dev defaults; pinning it would defeat the check.
+- rag-v2 before/after: every script now captures the SORTED EXACT VECTOR-ID
+  LIST of rag-v2 right after the app is healthy (`ragv2_ids()`, index.list —
+  never stats) and asserts BEFORE == AFTER near the RESULT line. The list
+  prints `(empty)` when the namespace has no vectors so the ck empty-guard
+  cannot false-PASS. Currently the baseline is the 5 sample-KB vector ids
+  from H6 — the scripts no longer assume anything about the count.
+- b2.sh fix found by the first live run: the legacy-chat guard read
+  `OPENAI_API_KEY` from the HOST shell env (a stale assumption — keys live
+  in .env), so the check skipped even though .env had both keys. Now guards
+  on `.env` exactly like g1.sh: `grep -q '^OPENAI_API_KEY=..*' .env`.
+
+### Executed evidence
+
+```
+bash -n scripts/verify/*.sh            → all six OK
+bash scripts/verify/b5.sh              → PASS=13 FAIL=0 SKIP=0 (07:47:41Z)
+                                         1 real LLM call; trap: "deleted 1
+                                         vectors by id"; rag-v2 5 ids == 5 ids
+bash scripts/verify/b2.sh (run 1)      → 72/0/1 — the skip EXPOSED the stale
+                                         host-env OPENAI guard above; fixed
+bash scripts/verify/b2.sh (run 2)      → PASS=73 FAIL=0 SKIP=0 (07:52:16Z)
+                                         1 real LLM call; rag-v2 5 ids == 5 ids
+b3/b4/b6/g1                            → edited identically (pins + ragv2_ids),
+                                         bash -n clean; NOT re-run live this
+                                         step (LLM budget) — their next
+                                         scheduled runs exercise the pins.
+```
+
+Real-LLM spend this step: TWO calls (one b5 chat, one b2 chat), disclosed.
+
+### Side observation (REPORT only)
+
+`data/audit.db` reads NOFILE in this b5 run: the H5 report left its deletion
+to Farhad; the file is gone from `data/` as of 2026-11-16 (his action — this
+session never touches it). Nothing in the app can recreate it (CHECK 1+2
+prove that again in the same run).

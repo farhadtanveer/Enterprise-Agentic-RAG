@@ -52,6 +52,16 @@ skip() { echo "SKIP  $1 ($2)"; SKIPPED=$((SKIPPED+1)); }
 note() { echo "---- $*"; }
 psql() { docker exec $DB psql -U rag -d $DBV -Atc "$1"; }
 cli()  { printf "$2" | docker exec -i $APP python -m app.cli "$1" ${3:-} 2>&1 | tail -2; }
+# H9: rag-v2 guarded by EXACT vector ids before/after, never a count assumption.
+ragv2_ids() { docker exec -i $APP python -c "
+from app.rag.vectorstore import ensure_index
+idx = ensure_index()
+ids = []
+for page in idx.list(namespace='rag-v2', limit=100):
+    ids.extend([v if isinstance(v, str) else v.id
+                for v in (page if isinstance(page, list) else page.vectors)])
+print(' '.join(sorted(ids)) if ids else '(empty)')
+" 2>/dev/null; }
 
 cleanup() {
   docker rm -f $APP $APP_HOST $APP_SPRAY >/dev/null 2>&1
@@ -77,6 +87,8 @@ docker run -d --name $APP --network $NET -p 127.0.0.1:$PORT:8080 \
   -e ADMIN_API_KEY=verify-admin-key \
   -e LOGIN_RATE_LIMIT_PER_MINUTE=1000 \
   -e CHAT_RATE_LIMIT_PER_MINUTE=1000 \
+  -e ENABLE_WEB_FALLBACK=false \
+  -e PINECONE_NAMESPACE=multi-user-test \
   enterprise-agentic-rag-app:latest \
   uvicorn app.main:app --host 0.0.0.0 --port 8080 >/dev/null
 
@@ -85,6 +97,14 @@ for i in $(seq 1 60); do
   sleep 2
 done
 ck "disposable app healthy on $BASE" "200" "$(curl -s -o /dev/null -w '%{http_code}' $BASE/api/health)"
+
+# --- H9 baseline: rag-v2 by exact ids (compare again at the end) ---------------
+if grep -q '^PINECONE_API_KEY=..*' .env; then
+  RAGV2_BEFORE=$(ragv2_ids)
+  echo "      rag-v2 baseline (ids): $RAGV2_BEFORE"
+else
+  RAGV2_BEFORE="(no-pinecone-key)"
+fi
 
 # ===== 1. bootstrap-admin: first run succeeds, second refuses; recovery CLIs ==
 note "CHECK 1: bootstrap-admin / reset-password / unlock (password via stdin, never argv)"
@@ -312,7 +332,7 @@ ING401=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/ingest -H "X-A
 ck "legacy ingest wrong admin key -> 401" "401" "$ING401"
 ING400=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/ingest -H "X-Admin-Key: verify-admin-key" -F "file=@README.md;filename=x.exe")
 ck "legacy ingest unsupported type -> 400" "400" "$ING400"
-if [ -n "${OPENAI_API_KEY:-}" ] && grep -q '^PINECONE_API_KEY=..*' .env; then
+if grep -q '^OPENAI_API_KEY=..*' .env && grep -q '^PINECONE_API_KEY=..*' .env; then
   LCHAT=$(curl -s --max-time 120 -X POST $BASE/api/chat -H "Content-Type: application/json" \
     -d '{"question":"How do I connect to the company VPN?"}' -o /dev/null -w '%{http_code}')
   ck "legacy chat answers end-to-end (1 real LLM call)" "200" "$LCHAT"
@@ -356,6 +376,8 @@ docker run -d --name $APP_SPRAY --network $NET -p 127.0.0.1:$PORT_SEC:8080 \
   -e DATABASE_URL="postgresql+psycopg://rag:rag@db:5432/$DBV" \
   -e RUN_MIGRATIONS_ON_STARTUP=true -e COOKIE_SECURE=false -e APP_ENV=development \
   -e LOGIN_RATE_LIMIT_PER_MINUTE=5 \
+  -e ENABLE_WEB_FALLBACK=false \
+  -e PINECONE_NAMESPACE=multi-user-test \
   enterprise-agentic-rag-app:latest \
   uvicorn app.main:app --host 0.0.0.0 --port 8080 >/dev/null
 for i in $(seq 1 60); do
@@ -379,6 +401,8 @@ docker run -d --name $APP_HOST --network $NET -p 127.0.0.1:$PORT_HOST:8080 \
   -e DATABASE_URL="postgresql+psycopg://rag:rag@db:5432/$DBV" \
   -e RUN_MIGRATIONS_ON_STARTUP=true -e COOKIE_SECURE=true -e APP_ENV=development \
   -e LOGIN_RATE_LIMIT_PER_MINUTE=1000 \
+  -e ENABLE_WEB_FALLBACK=false \
+  -e PINECONE_NAMESPACE=multi-user-test \
   enterprise-agentic-rag-app:latest \
   uvicorn app.main:app --host 0.0.0.0 --port 8080 >/dev/null
 for i in $(seq 1 60); do
@@ -397,6 +421,15 @@ ck "no argv password parameters in app/cli.py" "0" "$ARGV"
 DOCS=$(grep -c "hide_input=True" app/cli.py)
 if [ "$DOCS" -ge 1 ]; then ck "passwords read via hidden prompts (getpass-style)" "YES" "YES"
 else ck "passwords read via hidden prompts" "YES" "NO"; fi
+
+# ===== H9: rag-v2 untouched, by exact ids =======================================
+note "CHECK H9: rag-v2 unchanged (before == after, exact ids)"
+if grep -q '^PINECONE_API_KEY=..*' .env; then
+  RAGV2_AFTER=$(ragv2_ids)
+  ck "rag-v2 ids unchanged across the whole run" "$RAGV2_BEFORE" "$RAGV2_AFTER"
+else
+  skip "rag-v2 ids unchanged" "PINECONE_API_KEY empty in .env"
+fi
 
 echo "=============================================================="
 echo "RESULT: PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED  ($(date -u '+%Y-%m-%d %H:%M:%SZ'))"

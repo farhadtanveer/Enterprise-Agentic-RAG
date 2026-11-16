@@ -158,6 +158,19 @@ print(json.dumps({k: v.vector_count for k, v in ns.items()}, sort_keys=True))
 " 2>/dev/null)
 echo "      namespace stats before: $LEGACY_STATS_BEFORE"
 
+# --- H9 baseline: rag-v2 by EXACT ids (compared again at the end) --------------
+ragv2_ids() { dc exec -i $APP python -c "
+from app.rag.vectorstore import ensure_index
+idx = ensure_index()
+ids = []
+for page in idx.list(namespace='rag-v2', limit=100):
+    ids.extend([v if isinstance(v, str) else v.id
+                for v in (page if isinstance(page, list) else page.vectors)])
+print(' '.join(sorted(ids)) if ids else '(empty)')
+" 2>/dev/null; }
+RAGV2_BEFORE=$(ragv2_ids)
+echo "      rag-v2 baseline (ids): $RAGV2_BEFORE"
+
 BOOTSTRAP_OUT=$(printf "g1boss\n$ADMIN_PW\n$ADMIN_PW\n" | dc exec -i $APP python -m app.cli bootstrap-admin 2>&1 | tail -1)
 ckc "bootstrap-admin" "created" "$BOOTSTRAP_OUT"
 AJAR="$TMP/admin-jar"
@@ -311,6 +324,11 @@ print(json.dumps({k: v.vector_count for k, v in ns.items()}, sort_keys=True))
 ck "legacy namespace untouched" \
   "$(printf '%s' "$LEGACY_STATS_BEFORE" | grep -o "\"$LEGACY_NS\": [0-9]*")" \
   "$(printf '%s' "$LEGACY_STATS_AFTER" | grep -o "\"$LEGACY_NS\": [0-9]*")"
+
+# ===== H9: rag-v2 untouched, by exact ids =======================================
+note "CHECK H9: rag-v2 unchanged (before == after, exact ids)"
+RAGV2_AFTER=$(ragv2_ids)
+ck "rag-v2 ids unchanged across the whole run" "$RAGV2_BEFORE" "$RAGV2_AFTER"
 
 echo "=============================================================="
 echo "RESULT: PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED  ($(date -u '+%Y-%m-%d %H:%M:%SZ'))"

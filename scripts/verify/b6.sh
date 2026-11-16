@@ -126,12 +126,26 @@ dc run -d --name $APP --network $NET -p 127.0.0.1:$PORT:8080 \
   -e DATABASE_URL="postgresql+psycopg://rag:rag@db:5432/$DBV" \
   -e RUN_MIGRATIONS_ON_STARTUP=true -e COOKIE_SECURE=false -e APP_ENV=development \
   -e LOGIN_RATE_LIMIT_PER_MINUTE=1000 -e PINECONE_NAMESPACE=$NS \
+  -e ENABLE_WEB_FALLBACK=false \
   enterprise-agentic-rag-app:latest \
   uvicorn app.main:app --host 0.0.0.0 --port 8080 >/dev/null
 for i in $(seq 1 60); do
   [ "$(curl -s -o /dev/null -w '%{http_code}' $BASE/api/health)" = "200" ] && break; sleep 2
 done
 ck "disposable app healthy" "200" "$(curl -s -o /dev/null -w '%{http_code}' $BASE/api/health)"
+
+# --- H9 baseline: rag-v2 by exact ids (compared again at the end) --------------
+ragv2_ids() { dc exec -i $APP python -c "
+from app.rag.vectorstore import ensure_index
+idx = ensure_index()
+ids = []
+for page in idx.list(namespace='rag-v2', limit=100):
+    ids.extend([v if isinstance(v, str) else v.id
+                for v in (page if isinstance(page, list) else page.vectors)])
+print(' '.join(sorted(ids)) if ids else '(empty)')
+" 2>/dev/null; }
+RAGV2_BEFORE=$(ragv2_ids)
+echo "      rag-v2 baseline (ids): $RAGV2_BEFORE"
 
 BOOTSTRAP_OUT=$(printf "verifyboss6\n$ADMIN_PW\n$ADMIN_PW\n" | dc exec -i $APP python -m app.cli bootstrap-admin 2>&1 | tail -1)
 ckc "bootstrap-admin" "created" "$BOOTSTRAP_OUT"
@@ -337,6 +351,11 @@ RELOG2=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/auth/login \
 ck "deleted user login -> 401" "401" "$RELOG2"
 AUD=$(psql "SELECT count(*) FROM audit_events ae WHERE ae.event_type='user_deleted' AND ae.details->>'self'='true' AND ae.actor_user_id IS NULL")
 ck "user_deleted audit event anonymized (actor NULL)" "1" "$AUD"
+
+# ===== H9: rag-v2 untouched, by exact ids =======================================
+note "CHECK H9: rag-v2 unchanged (before == after, exact ids)"
+RAGV2_AFTER=$(ragv2_ids)
+ck "rag-v2 ids unchanged across the whole run" "$RAGV2_BEFORE" "$RAGV2_AFTER"
 
 echo "=============================================================="
 echo "RESULT: PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED  ($(date -u '+%Y-%m-%d %H:%M:%SZ'))"

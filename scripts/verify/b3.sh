@@ -38,6 +38,16 @@ ckn() { local d="$1" n="$2" h="$3"   # must NOT contain
 skip() { echo "SKIP  $1 ($2)"; SKIPPED=$((SKIPPED+1)); }
 note() { echo "---- $*"; }
 psql() { docker exec $DB psql -U rag -d $DBV -Atc "$1"; }
+# H9: rag-v2 guarded by EXACT vector ids before/after, never a count assumption.
+ragv2_ids() { docker exec -i $APP python -c "
+from app.rag.vectorstore import ensure_index
+idx = ensure_index()
+ids = []
+for page in idx.list(namespace='rag-v2', limit=100):
+    ids.extend([v if isinstance(v, str) else v.id
+                for v in (page if isinstance(page, list) else page.vectors)])
+print(' '.join(sorted(ids)) if ids else '(empty)')
+" 2>/dev/null; }
 
 cleanup() {
   docker rm -f $APP $APP_CAPS >/dev/null 2>&1
@@ -59,12 +69,21 @@ docker run -d --name $APP --network $NET -p 127.0.0.1:$PORT:8080 \
   -e DATABASE_URL="postgresql+psycopg://rag:rag@db:5432/$DBV" \
   -e RUN_MIGRATIONS_ON_STARTUP=true -e COOKIE_SECURE=false -e APP_ENV=development \
   -e ADMIN_API_KEY=verify-admin-key -e LOGIN_RATE_LIMIT_PER_MINUTE=1000 \
+  -e ENABLE_WEB_FALLBACK=false -e PINECONE_NAMESPACE=multi-user-test \
   enterprise-agentic-rag-app:latest \
   uvicorn app.main:app --host 0.0.0.0 --port 8080 >/dev/null
 for i in $(seq 1 60); do
   [ "$(curl -s -o /dev/null -w '%{http_code}' $BASE/api/health)" = "200" ] && break; sleep 2
 done
 ck "disposable app healthy" "200" "$(curl -s -o /dev/null -w '%{http_code}' $BASE/api/health)"
+
+# --- H9 baseline: rag-v2 by exact ids (compared again at the end) --------------
+if grep -q '^PINECONE_API_KEY=..*' .env; then
+  RAGV2_BEFORE=$(ragv2_ids)
+  echo "      rag-v2 baseline (ids): $RAGV2_BEFORE"
+else
+  RAGV2_BEFORE="(no-pinecone-key)"
+fi
 
 printf "verifyboss3\n$ADMIN_PW\n$ADMIN_PW\n" | docker exec -i $APP python -m app.cli bootstrap-admin >/dev/null 2>&1
 docker exec -i $APP python -c "
@@ -149,6 +168,7 @@ docker run -d --name $APP --network $NET -p 127.0.0.1:$PORT:8080 \
   -e DATABASE_URL="postgresql+psycopg://rag:rag@db:5432/$DBV" \
   -e COOKIE_SECURE=false -e APP_ENV=development -e ADMIN_API_KEY=verify-admin-key \
   -e LOGIN_RATE_LIMIT_PER_MINUTE=1000 -e OPENAI_API_KEY= \
+  -e ENABLE_WEB_FALLBACK=false -e PINECONE_NAMESPACE=multi-user-test \
   enterprise-agentic-rag-app:latest \
   uvicorn app.main:app --host 0.0.0.0 --port 8080 >/dev/null
 for i in $(seq 1 60); do
@@ -174,6 +194,7 @@ RETRY_CODE=$(docker rm -f $APP >/dev/null 2>&1; docker run -d --name $APP --netw
   -e DATABASE_URL="postgresql+psycopg://rag:rag@db:5432/$DBV" \
   -e COOKIE_SECURE=false -e APP_ENV=development -e ADMIN_API_KEY=verify-admin-key \
   -e LOGIN_RATE_LIMIT_PER_MINUTE=1000 \
+  -e ENABLE_WEB_FALLBACK=false -e PINECONE_NAMESPACE=multi-user-test \
   enterprise-agentic-rag-app:latest \
   uvicorn app.main:app --host 0.0.0.0 --port 8080 >/dev/null; for i in $(seq 1 60); do
     [ "$(curl -s -o /dev/null -w '%{http_code}' $BASE/api/health)" = "200" ] && break; sleep 2; done;
@@ -230,6 +251,7 @@ docker run -d --name $APP_CAPS --network $NET -p 127.0.0.1:$PORT_CAPS:8080 \
   -e ADMIN_API_KEY=verify-admin-key -e LOGIN_RATE_LIMIT_PER_MINUTE=1000 \
   -e MAX_MESSAGE_LENGTH=50 -e MAX_MESSAGES_PER_CONVERSATION=2 \
   -e MAX_CONVERSATIONS_PER_USER=2 -e CHAT_RATE_LIMIT_PER_MINUTE=2 \
+  -e ENABLE_WEB_FALLBACK=false -e PINECONE_NAMESPACE=multi-user-test \
   enterprise-agentic-rag-app:latest \
   uvicorn app.main:app --host 0.0.0.0 --port 8080 >/dev/null
 BCAP=http://127.0.0.1:$PORT_CAPS
@@ -287,6 +309,15 @@ print(','.join(sorted(inspect.signature(ask).parameters)))")
 ck "ask() has no follow-up context parameter (D19)" "question,retrieval_filter" "$D19"
 ck "legacy /api/chat still validates body (422)" "422" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/chat -H 'Content-Type: application/json' -d '{"question":""}')"
 ck "legacy /api/ingest wrong key still 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/ingest -H 'X-Admin-Key: nope' -F 'file=@README.md;filename=x.txt')"
+
+# ===== H9: rag-v2 untouched, by exact ids =======================================
+note "CHECK H9: rag-v2 unchanged (before == after, exact ids)"
+if grep -q '^PINECONE_API_KEY=..*' .env; then
+  RAGV2_AFTER=$(ragv2_ids)
+  ck "rag-v2 ids unchanged across the whole run" "$RAGV2_BEFORE" "$RAGV2_AFTER"
+else
+  skip "rag-v2 ids unchanged" "PINECONE_API_KEY empty in .env"
+fi
 
 echo "=============================================================="
 echo "RESULT: PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED  ($(date -u '+%Y-%m-%d %H:%M:%SZ'))"
