@@ -142,3 +142,113 @@ def test_racing_admins_never_leave_zero_active(db_session, pg_engine, monkeypatc
         )
     finally:
         fastapi_app.dependency_overrides.clear()
+
+
+# --- H11 (docs/tasks/g2.md): the same race on the two DELETE paths -------------
+# The guard window is identical (active_admin_count … commit) but the ROUTES
+# differ: DELETE /api/admin/users/{id} (each admin deletes the OTHER) and
+# DELETE /api/me (each admin deletes THEMSELVES, confirm-gated). The lock must
+# hold on every path — proven here, not assumed from the PATCH proof.
+
+
+def _race_setup(db_session, pg_engine, monkeypatch, attempt):
+    """Shared race scaffolding: widened guard window + fresh-session override
+    + two barrier-synced admin clients. Returns (uid_a, uid_b, client_a,
+    client_b, csrf_a, csrf_b, barrier) — callers submit their own requests."""
+    real_count = users_svc.active_admin_count
+
+    def widened_count(db):
+        n = real_count(db)  # unchanged semantics — widens the window only
+        time.sleep(0.05)
+        return n
+
+    monkeypatch.setattr(users_svc, "active_admin_count", widened_count)
+
+    def _fresh_session_per_request():
+        db = Session(bind=pg_engine, expire_on_commit=False)
+        try:
+            yield db
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    fastapi_app.dependency_overrides[app_get_db] = _fresh_session_per_request
+
+    name_a, name_b = f"racedel{attempt}a", f"racedel{attempt}b"
+    _make(db_session, name_a)
+    _make(db_session, name_b)
+    uid_a = db_session.execute(
+        select(User.id).where(User.username == name_a)
+    ).scalar_one()
+    uid_b = db_session.execute(
+        select(User.id).where(User.username == name_b)
+    ).scalar_one()
+    client_a = TestClient(fastapi_app, client=PEER)
+    client_b = TestClient(fastapi_app, client=PEER)
+    csrf_a = _login(client_a, name_a)
+    csrf_b = _login(client_b, name_b)
+    return str(uid_a), str(uid_b), client_a, client_b, csrf_a, csrf_b, threading.Barrier(2)
+
+
+def _assert_race_outcome(db_session, attempt, codes):
+    assert codes.count(409) >= 1, (
+        f"attempt {attempt}: neither racing delete was refused — codes={codes}"
+    )
+    assert 200 in codes, f"attempt {attempt}: no delete succeeded: {codes}"
+    remaining = db_session.execute(
+        select(User.id).where(User.role == "admin", User.is_active.is_(True))
+    ).scalars().all()
+    assert len(remaining) >= 1, (
+        f"attempt {attempt}: ZERO active admins survived — codes={codes}"
+    )
+
+
+@pytest.mark.parametrize("attempt", range(20))
+def test_racing_admin_user_deletes_never_leave_zero_active(
+    db_session, pg_engine, monkeypatch, attempt
+):
+    """H11: DELETE /api/admin/users/{id} — two admins delete EACH OTHER."""
+    uid_a, uid_b, client_a, client_b, csrf_a, csrf_b, barrier = _race_setup(
+        db_session, pg_engine, monkeypatch, attempt
+    )
+
+    def _delete_other(client, csrf, target_id, bar):
+        bar.wait(timeout=10)
+        return client.delete(
+            f"/api/admin/users/{target_id}?confirm=true",
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(_delete_other, client_a, csrf_a, uid_b, barrier)
+            f2 = pool.submit(_delete_other, client_b, csrf_b, uid_a, barrier)
+            r1, r2 = f1.result(timeout=30), f2.result(timeout=30)
+        _assert_race_outcome(db_session, attempt, [r1.status_code, r2.status_code])
+    finally:
+        fastapi_app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("attempt", range(20))
+def test_racing_admin_self_deletes_never_leave_zero_active(
+    db_session, pg_engine, monkeypatch, attempt
+):
+    """H11: DELETE /api/me — two admins self-delete at the same moment."""
+    uid_a, uid_b, client_a, client_b, csrf_a, csrf_b, barrier = _race_setup(
+        db_session, pg_engine, monkeypatch, attempt
+    )
+
+    def _delete_self(client, csrf, bar):
+        bar.wait(timeout=10)
+        return client.delete("/api/me?confirm=true", headers={"X-CSRF-Token": csrf})
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(_delete_self, client_a, csrf_a, barrier)
+            f2 = pool.submit(_delete_self, client_b, csrf_b, barrier)
+            r1, r2 = f1.result(timeout=30), f2.result(timeout=30)
+        _assert_race_outcome(db_session, attempt, [r1.status_code, r2.status_code])
+    finally:
+        fastapi_app.dependency_overrides.clear()

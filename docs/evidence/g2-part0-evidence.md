@@ -210,3 +210,50 @@ prove that again in the same run).
 - NOT RUN against real data: the mandate reserves the bad%00name.txt
   orphan row for Farhad. The only executions were the tests (tmp_path).
 - Full suite: 309 passed / 0 failed (302 + 7).
+
+## H11 — last-admin race extended to the DELETE paths + production-hook grep (2026-11-16)
+
+Mandate: extend the race test to admin delete-user and DELETE /api/me;
+grep production code for artificial sleeps / test hooks.
+
+### New tests (tests/security/test_last_admin_race.py, +40)
+
+- `test_racing_admin_user_deletes_never_leave_zero_active` — two barrier-
+  synced admins DELETE EACH OTHER via `/api/admin/users/{id}?confirm=true`,
+  20 attempts.
+- `test_racing_admin_self_deletes_never_leave_zero_active` — two admins
+  DELETE `/api/me?confirm=true` (themselves) at the same moment, 20
+  attempts.
+- Same scaffolding as the H3 PATCH race (widened `active_admin_count`
+  window + fresh session per request + barrier); same invariants: at least
+  one 409 `last_admin`, exactly one 200, ≥1 active admin remains.
+
+### RED-first proof (the mutant, not luck)
+
+The guard is already locked (H3), so the new tests had to prove they bite:
+with the M-C1-style mutant applied (`with_for_update()` removed from
+`active_admin_count` in app/services/users.py):
+
+```
+command: docker compose --profile test run --rm test python -m pytest \
+           "...test_racing_admin_user_deletes..." "...test_racing_admin_self_deletes..." -q
+expected: both new tests fail (the unlocked window lets both deletes through)
+actual:   40 failed (40/40 attempts red)          PASS/FAIL: FAIL as expected
+restore:  git checkout -- app/services/users.py (working tree then clean
+          except the test file)
+green:    docker compose ... -m pytest tests/security/test_last_admin_race.py -q
+          60 passed (20 PATCH + 20 admin-delete + 20 self-delete)
+full suite: 349 passed / 0 failed (309 + 40)
+```
+
+### Production-code grep (mandated report)
+
+```
+grep -rn "sleep(" app/
+  → exactly ONE hit: app/rag/vectorstore.py:102 time.sleep(1) — the
+    ensure_index readiness poll between describe_index calls, bounded by
+    INDEX_READY_TIMEOUT_SECONDS, on the Pinecone-index-provisioning path.
+    NOT in any auth/guard path; production-legitimate.
+grep -rniE "test_hook|testing|monkeypatch|fake_|_test_|allow_test|skip_auth|backdoor" app/
+  → (none) — zero test hooks in production code.
+```
