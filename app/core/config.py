@@ -33,14 +33,11 @@ class Settings(BaseSettings):
     chat_api_key: str = ""
     chat_rate_limit_per_minute: int = 20
     upload_dir: str = str(BASE_DIR / "uploads")
-    sample_kb_dir: str = str(BASE_DIR / "data" / "sample_kb")
 
     # --- Multi-user foundation (docs/backend-design.md, Phase B) ---
     # Dev default is the compose-network hostname (db:5432): the dev DB has
     # no host port by design (LAN exposure). CI and prod override via env.
     database_url: str = "postgresql+psycopg://rag:rag@db:5432/rag"
-    # Tests fail fast when this is unset; never default to the dev database.
-    test_database_url: str = ""
     # Secure cookie flag: keep true everywhere except local plain-http dev.
     cookie_secure: bool = True
     session_idle_hours: int = 168  # 7 days sliding
@@ -51,9 +48,6 @@ class Settings(BaseSettings):
     # accepts external search.
     enable_web_fallback: bool = False
     max_upload_mb: int = 25  # 413 beyond this; enforced while streaming
-    # D5: 0 = keep conversations until the user deletes them (sweep deferred).
-    conversation_retention_days: int = 0
-    pinecone_test_namespace: str = "multi-user-test"
     # --- B2 login protection (docs/backend-design.md §A3/§A5) ---
     # Per-IP sliding window on POST /api/auth/login (0 = off).
     login_rate_limit_per_minute: int = 10

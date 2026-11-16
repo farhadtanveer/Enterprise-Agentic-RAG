@@ -16,7 +16,6 @@ def test_database_settings_defaults(monkeypatch):
     monkeypatch.delenv("COOKIE_SECURE", raising=False)
     s = _settings()
     assert s.database_url.startswith("postgresql+psycopg://")
-    assert s.test_database_url == ""  # never silently point tests at the dev DB
     assert s.cookie_secure is True  # secure by default; opt out only for local http
 
 
@@ -35,8 +34,6 @@ def test_feature_flags_and_limits_defaults():
     # Tavily unless a deployment explicitly opts in.
     assert s.enable_web_fallback is False
     assert s.max_upload_mb == 25
-    assert s.conversation_retention_days == 0  # D5: off until a policy exists
-    assert s.pinecone_test_namespace == "multi-user-test"
 
 
 def test_env_overrides_win(monkeypatch):
