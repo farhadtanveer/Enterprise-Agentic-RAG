@@ -1,17 +1,42 @@
 """Test bootstrap: force offline, keyless settings before any app import."""
 import os
 
-# Env vars beat the project .env in pydantic-settings. Empty keys mean any
-# accidental real network call raises instead of reaching out.
+# --- H8 hermetic pins (docs/tasks/g2.md) ---------------------------------------
+# Env vars beat the project .env in pydantic-settings, so these make the
+# suite immune to whatever the developer's .env or the CI runner carries.
+# Empty keys mean any accidental real network call raises instead of
+# reaching out. The two INFRA vars (TEST_DATABASE_URL / ALEMBIC_DATABASE_URL
+# — where the database lives) are deliberately NOT pinned: they are the
+# runner's provision and fail fast when missing (pg_engine below). Every
+# other setting a test could lean on is pinned to its code default here.
 os.environ["OPENAI_API_KEY"] = ""
 os.environ["TAVILY_API_KEY"] = ""
 os.environ["PINECONE_API_KEY"] = ""
-# (B5/C8: the legacy audit writer is gone — nothing writes audit.db anymore.)
 # The test client speaks plain http to TestClient's http://testserver; the
 # cookie jar would refuse to SEND Secure cookies back over http, breaking
 # every session test. Cookie-flag VALUES are asserted from raw Set-Cookie
 # headers, not from the jar (see tests/test_auth_api.py).
 os.environ["COOKIE_SECURE"] = "false"
+os.environ["APP_ENV"] = "development"  # production validators must never fire from a dev .env
+os.environ["RUN_MIGRATIONS_ON_STARTUP"] = "false"  # importing app.main must never migrate ANY db
+os.environ["ENABLE_WEB_FALLBACK"] = "false"  # amended D6 default; web-path tests opt IN explicitly
+os.environ["ADMIN_API_KEY"] = "change-me"  # code default; key tests monkeypatch per scenario
+os.environ["CHAT_API_KEY"] = ""  # code default; unauthenticated legacy chat in tests
+os.environ["LOGIN_THROTTLE_PEPPER"] = ""  # deterministic dev-fallback hashing
+os.environ["DATABASE_URL"] = (  # any accidental production-DB use fails loudly, never silently hits a real DB
+    "postgresql+psycopg://tests@hermetic.invalid/test"
+)
+# Belt over the namespace rule (CLAUDE.md): an offline test can never write
+# to rag-v2 or enterprise-agentic-rag even through a bug — only multi-user-test.
+os.environ["PINECONE_NAMESPACE"] = "multi-user-test"
+# The caps the chat/upload tests lean on implicitly (found by the H8
+# poisoned-env run: MAX_MESSAGE_LENGTH=7 / MAX_UPLOAD_MB=1 /
+# MAX_CONVERSATIONS_PER_USER=1 broke 20 tests). Pinned to their CODE
+# defaults; tests that exercise a cap override it explicitly.
+os.environ["MAX_UPLOAD_MB"] = "25"
+os.environ["MAX_MESSAGE_LENGTH"] = "3000"
+os.environ["MAX_MESSAGES_PER_CONVERSATION"] = "200"
+os.environ["MAX_CONVERSATIONS_PER_USER"] = "100"
 
 import pytest
 from pathlib import Path

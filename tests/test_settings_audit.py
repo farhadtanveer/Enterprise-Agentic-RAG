@@ -79,6 +79,20 @@ def test_every_setting_is_referenced_by_production_code():
 # --- the three fields whose EFFECT had no test anywhere ------------------------
 
 
+def test_suite_runs_on_the_hermetic_pins():
+    """H8: the pins in tests/conftest.py are LOAD-BEARING — this fails if a
+    pin is removed or renamed, i.e. the suite would silently start reading
+    the developer's .env again."""
+    s = get_settings()
+    assert s.app_env == "development"
+    assert s.run_migrations_on_startup is False
+    assert s.enable_web_fallback is False
+    assert s.admin_api_key == "change-me"
+    assert s.chat_api_key == ""
+    assert s.database_url.endswith("hermetic.invalid/test")
+    assert s.pinecone_namespace == "multi-user-test"
+
+
 def test_app_name_is_the_health_payload_and_app_title():
     s = get_settings()
     assert routes.health()["service"] == s.app_name  # the read effect
