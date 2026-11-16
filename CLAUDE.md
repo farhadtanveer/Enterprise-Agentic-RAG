@@ -74,6 +74,10 @@ Task files: docs/tasks/.
 - One step = one commit; push after every green step; keep CI green;
   never leave large work uncommitted.
 - When resuming, read docs/tasks/ and docs/PROGRESS.md first.
+- Tests are hermetic: they never depend on the developer's .env or the
+  compose environment.
+- Every setting must be read by production code and proven by a test; no
+  decorative settings.
 
 ## Environment (Windows, Docker Desktop, MSYS bash)
 
