@@ -451,3 +451,40 @@ def test_unknown_document_id_is_404_on_every_verb(client, db_session):
     assert client.delete(f"/api/documents/{ghost}",
                          headers={"X-CSRF-Token": csrf}).status_code == 404
     assert db_session.execute(select(Document)).scalars().all() == []
+
+
+def test_documents_service_exposes_no_audience_move_function():
+    """A14.8 #5 (DECISION #3): a document NEVER changes scope/group after
+    creation — the service layer must not even HAVE a move/rescope/re-home
+    function to call. (Route-level 422s are proven by
+    test_patch_display_name_and_no_moves; this pins the deeper layer.)"""
+    import re
+
+    from app.services import documents as docs_service
+
+    def is_move_name(name: str) -> bool:
+        # "move" NOT as part of "remove" (remove_stored_file stays a file
+        # operation, not an audience operation)
+        return bool(re.search(r"(?<!re)move", name.lower())) or any(
+            f in name.lower()
+            for f in ("rescope", "rehome", "re_home", "change_scope",
+                      "convert_scope", "retag")
+        )
+
+    names = {n for n in dir(docs_service) if callable(getattr(docs_service, n))}
+    offenders = {n for n in names if is_move_name(n)}
+    assert not offenders, f"audience-move functions must not exist: {offenders}"
+
+
+def test_upload_into_archived_group_is_404(client, db_session):
+    """H13 semantics on the write path: an archived group is in NOBODY's
+    audience — uploads into it are refused like any unknown group."""
+    editor = make(db_session, "arch-ed")
+    g = groups_svc.create_group(db_session, "arch-upload-g")
+    groups_svc.add_member(db_session, g, editor, role="editor")
+    groups_svc.update_group(db_session, g, is_active=False)  # archive
+    db_session.commit()
+    csrf = login(client, "arch-ed")
+    r = upload(client, csrf, name="x.txt", group_id=str(g.id))
+    assert r.status_code == 404, (r.status_code, r.text)
+    assert db_session.execute(select(Document)).scalars().all() == []

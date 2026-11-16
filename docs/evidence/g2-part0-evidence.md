@@ -444,3 +444,20 @@ Suite: 385 passed / 0 failed (379 + 5... 380 + 5).
 - Added the explicit sweep: an unknown document id answers 404 on GET,
   PATCH and DELETE for an authenticated caller (existence never leaks on
   any verb); no rows result. 16/16 green in the two affected files.
+
+## G2 PART A — behavior-test coverage (A14.8, 2026-11-16)
+
+The upload/quota/admin-visibility behavior tests landed inline with the
+A-steps; this step closes the last two pins:
+- NO-MOVE service surface (A14.8 #5): the documents service exposes NO
+  function whose name moves/rescopes/re-homes a document (regex excludes
+  "remove" — remove_stored_file is a file op, not an audience op; caught
+  by the test's own first run and fixed in the matcher).
+- Archived-group upload refusal (H13 on the write path): an editor of an
+  ARCHIVED group gets 404 (like an unknown group); no row, no file.
+Coverage map: #7 quotas (test_upload_quotas + race), #8 parser subprocess
+(test_parser_subprocess), #11 admin visibility (test_admin_documents_listing
++ the B6-era leak test), #5 no-moves (route 422s + service-surface pin),
+storage/deletion hardening (#14: test_user_upload_storage_rules + the
+tests/security suite running unchanged).
+Suite: 392 passed / 0 failed.
