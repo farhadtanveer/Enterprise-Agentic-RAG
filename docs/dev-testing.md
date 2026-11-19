@@ -126,8 +126,15 @@ Loopback-only, never bare `5433:5432` (LAN exposure). Expect slowness on
 this Docker Desktop build (the relay stall described above); `docker compose
 down && up` afterwards to restore the no-publish posture.
 
-## Opt-in live Pinecone check (added in B4)
+## Pinecone and the suite (updated A5.4)
 
-One test module will talk to the real Pinecone **only** when
-`RUN_LIVE_PINECONE=1` **and** `PINECONE_API_KEY` are set, and only inside
-`PINECONE_TEST_NAMESPACE` (default `multi-user-test`). CI never sets these.
+The offline suite NEVER touches Pinecone: conftest pins
+`PINECONE_API_KEY=""` (any accidental real call raises) and
+`PINECONE_NAMESPACE=multi-user-test` as a belt over the namespace rule —
+CI never has keys. Live Pinecone work happens ONLY through
+`scripts/verify/*.sh`, which write to a UNIQUE PER-RUN namespace
+(`multi-user-test-<stamp>-<rand>`; the old shared `multi-user-test` pin
+plus the removed `PINECONE_TEST_NAMESPACE` setting went out with the H7
+settings audit — see docs/tasks/g2.md A5.4 for why per-run namespaces
+are mandatory now). rag-v2 and the legacy namespace are only ever READ
+(by exact ids / stats) to prove they stayed untouched.

@@ -469,3 +469,61 @@ CI-mode (was 406 + 3 new tests).
 ```
 verdict: PASS
 ```
+
+## A5.7 — The four decorative settings removed in PART 0 (H7), confirmed
+## (2026-11-19)
+
+The four fields the H7 audit (commit `9e2d0c9`) found decorative and
+REMOVED — not allowlisted (tests/test_settings_audit.py ALLOWLIST is
+deliberately empty):
+
+1. **`sample_kb_dir`** — read by nothing; the dead `ingest_sample_kb.py`
+   script went with it (sample-KB ingestion is the operator CLI
+   `ingest-org`, proven live in H6).
+2. **`pinecone_test_namespace`** — a Settings field nothing read; the
+   test namespace is a CONVENTION (conftest pin, CLAUDE.md rule), not a
+   setting — and since A5.4, verify scripts use unique per-run namespaces.
+3. **`conversation_retention_days`** — retention was never implemented;
+   keeping the field implied a feature that does not exist (D19 stays
+   open).
+4. **`test_database_url`** — not a production setting; where the tests
+   run is the RUNNER's provision (compose interpolation / CI env), read
+   directly by conftest, never by app code.
+
+**Confirmation sweep (this step):**
+
+```
+command:  grep for all four names + ingest_sample_kb across app/, tests/
+          conftest, README.md, .env.example, docs/dev-testing.md,
+          docker-compose.yml
+expected: no live reference (historical/removal notes excepted)
+actual:   only the intentional removal notes added THIS step; the
+          backend-design.md code-impact rows are design HISTORY (their
+          disposition already says "superseded by ingest-org CLI")
+verdict:  PASS
+command:  docker compose --profile test run --rm test \
+            python -m pytest tests/test_settings_audit.py -q
+actual:   8 passed — the reference audit still holds; nothing crept back
+verdict:  PASS
+```
+
+**Documentation fixes made this step:**
+- README.md: the deleted `python ingest_sample_kb.py` instruction (×2 —
+  setup block and the tree listing) replaced with the operator CLI form;
+- README.md: `PINECONE_NAMESPACE` default corrected to `rag-v2` (stale
+  pre-B4 row said `enterprise-agentic-rag`);
+- .env.example: `ENABLE_WEB_FALLBACK=true` template → `false` with the
+  amended-D6 explanation (true = explicit operator opt-in; H4 fixed the
+  code default and README but missed the template);
+- docs/dev-testing.md: the "opt-in live Pinecone check" section described
+  machinery that no longer exists (`RUN_LIVE_PINECONE` gone from the
+  repo, `PINECONE_TEST_NAMESPACE` removed in H7) — rewritten to the
+  current reality: the offline suite is keyless; live Pinecone happens
+  only in scripts/verify/*.sh under per-run namespaces.
+- .env.example TEST_DATABASE_URL rows are CORRECT as-is: the Settings
+  field was removed, but the env var itself is real (compose
+  interpolates it; conftest reads it) — infra var, not a code setting.
+
+```
+verdict: PASS
+```

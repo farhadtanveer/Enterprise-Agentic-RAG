@@ -73,13 +73,15 @@ docker compose --profile test run --rm test
 
 That builds the test image (runtime deps + pinned dev tools), starts Postgres 18, and runs the whole suite against it over the compose network — the dev DB deliberately has **no host port**, so nothing outside Docker (or your Wi-Fi) can reach it. Details and rules (real Postgres for the new schema, mocked LLM/Tavily/Pinecone, opt-in live check) in [docs/dev-testing.md](docs/dev-testing.md).
 
-Load the sample knowledge base:
+Load the sample knowledge base (operator CLI; the standalone
+`ingest_sample_kb.py` script was removed together with its decorative
+`SAMPLE_KB_DIR` setting in the H7 settings audit):
 
 ```bash
-python ingest_sample_kb.py
+docker compose run --rm app python -m app.cli ingest-org /app/data/sample_kb
 ```
 
-This reads everything in `data/sample_kb/` (a couple of fictional "NovaRetail" IT docs), chunks it, and pushes it to Pinecone. The index is created automatically if it doesn't exist yet.
+This reads every supported file in `data/sample_kb/` (a couple of fictional "NovaRetail" IT docs), chunks it, and pushes it to Pinecone as ORG documents (readable by everyone). The index is created automatically if it doesn't exist yet.
 
 Then run it:
 
@@ -102,7 +104,7 @@ All settings live in `app/core/config.py` and can be overridden via `.env`:
 | `OPENAI_MODEL`                | no               | `gpt-4o-mini`                              | Chat model                                                                                                                                                                                 |
 | `EMBEDDING_MODEL`             | no               | `text-embedding-3-small`                   | Dimension map lives in `app/rag/vectorstore.py`                                                                                                                                            |
 | `PINECONE_INDEX_NAME`         | no               | `enterprise-agentic-rag`                   | Index is auto-created                                                                                                                                                                      |
-| `PINECONE_NAMESPACE`          | no               | `enterprise-agentic-rag`                   |                                                                                                                                                                                            |
+| `PINECONE_NAMESPACE`          | no               | `rag-v2` (since B4; legacy `enterprise-agentic-rag` is read-only until operator cleanup) |                                                                                                                                                            |
 | `TOP_K`                       | no               | `4`                                        | Chunks fetched per retrieval                                                                                                                                                               |
 | `MAX_RETRIES`                 | no               | `1`                                        | Query-rewrite retries before giving up                                                                                                                                                     |
 | `INDEX_READY_TIMEOUT_SECONDS` | no               | `120`                                      | How long to wait for a fresh Pinecone index before failing                                                                                                                                 |
@@ -164,7 +166,6 @@ The chat response includes the `answer`, which `source_used` produced it, the fu
 ├── data/
 │   └── sample_kb/             # fictional sample docs (NovaRetail IT handbook)
 ├── templates/  static/        # chat UI (Jinja2 + vanilla JS)
-├── ingest_sample_kb.py        # indexes data/sample_kb into Pinecone
 └── run.py                     # uvicorn entry point (port 8000, override with PORT)
 ```
 
