@@ -131,3 +131,73 @@ even a fresh row).
 ```
 verdict: PASS
 ```
+
+## A5.3 — Mutation harness working-tree safety (2026-11-19)
+
+Mandate: never discard uncommitted work — refuse to run on a dirty working
+tree; back up each target file to a temp directory and restore from that
+copy, never from git; assert a byte-identical restore.
+
+**What the audit found:** run-g2a-mutations.sh refused only tracked
+changes (`git diff` + `git diff --cached` — untracked files slipped
+through) and restored every mutant with `git checkout --` (a discarding
+restore); run-g1-mutations.sh had NO dirty-tree check at all and the same
+git-restore.
+
+**Tests first** (scripts/mutation/selftest.sh — a 25-check offline
+self-test against a throwaway sandbox git repo; sourcing-safety is checked
+BEFORE any source, so the RED run cannot start a real mutant run):
+
+```
+command:  bash scripts/mutation/selftest.sh
+RED run (before any harness change):
+  expected: the safety mechanics RED
+  actual:   PASS=10 FAIL=15 — no shared lib, harnesses not source-safe
+            (sourcing the old g2a harness STARTED A REAL MUTANT RUN —
+            harmlessly: the sandbox has no docker compose file and no
+            target files, and this demonstrated exactly why the guard is
+            mandated), g1 refused nothing, untracked files refused by
+            nobody, restores came from git, no byte-identical assertion
+  verdict:  PASS (RED as mandated)
+GREEN run (after the changes below):
+  actual:   PASS=25 FAIL=0, exit 0 —
+            S1 bash -n on all four scripts; S2 lib exists + both harnesses
+            source it; S3 BASH_SOURCE main guard (sourcing never runs
+            mutants); S10 zero git checkout/restore/stash in any harness;
+            S4/S5/S6 modified, staged AND untracked trees refused by BOTH
+            harnesses (target left byte-untouched); S7 backup→restore
+            round-trip returns the PRISTINE COPY's bytes while git HEAD
+            deliberately holds different bytes (restore-from-git would be
+            detectably wrong); S8 missing backup → loud RESTORE-FAILED,
+            nonzero exit, file left for manual recovery (no silent git
+            fallback); S9 an interrupted run (exit 3 mid-mutant) is
+            repaired by the EXIT trap and the temp dir is removed
+  verdict:  PASS
+```
+
+**What failed first during the self-test GREEN run:** two SELFTEST bugs
+(not harness bugs) — the sandbox initially copied only the g2a harness
+(the g1 refusal checks tested a nonexistent file) and the function tests
+ran in subshells that never inherited the sourced functions. Fixed in the
+self-test; the harness changes below were untouched by both failures.
+
+**Changes:**
+- NEW ``scripts/mutation/_lib.sh``: ``mutation_preflight`` (refuse on ANY
+  ``git status --porcelain`` output — modified, staged, untracked; create
+  the per-run ``mktemp -d`` backup dir; install the EXIT trap),
+  ``mutation_backup`` (pristine copy, kept once per file),
+  ``mutation_restore`` (copy back + ``cmp`` byte-identical assert; loud
+  exit on any failure — never a git fallback), ``mutation_restore_all``
+  (crash-safe trap; removes the run's own mktemp dir — the one recursive
+  delete allowed here), and the shared ``patch_file``.
+- run-g2a-mutations.sh / run-g1-mutations.sh: source the lib; preflight
+  replaces the old diff-based check (g1 gains a check it never had);
+  ``mutate()`` backs up before patching and restores from the copy with
+  the cmp assertion; the main run is guarded by ``BASH_SOURCE`` so
+  sourcing can never start mutants. Mutant list and selections UNCHANGED.
+- NEW ``scripts/mutation/selftest.sh`` (the tests above; offline, no
+  docker, no pytest).
+
+**Live integration proof** (run AFTER this commit so the preflight sees a
+clean tree): full g2a harness against the real repo — see the A5.3
+addendum section below for the recorded run.
