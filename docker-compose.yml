@@ -75,6 +75,13 @@ services:
       context: .
       target: test
     profiles: ["test"]
+    # A5.5: this container bind-mounts the repo and historically ran as
+    # root — pytest caches and bytecode landed ROOT-OWNED in the repo (the
+    # uploads/.incoming incident class). It now runs as a NON-ROOT uid and
+    # is repo-write-FREE: PYTHONDONTWRITEBYTECODE=1 comes from the image,
+    # and the cache provider is disabled below (tests write only to
+    # tmp_path in the container's own /tmp).
+    user: "1000:1000"
     environment:
       # Interpolated (not hardcoded rag:rag) so a .env password change
       # propagates; fails loudly when POSTGRES_PASSWORD is unset.
@@ -87,7 +94,7 @@ services:
       - .:/app
     # python -m (not the console script) so the repo root lands on sys.path
     # and `import app` resolves — same as CI and the host workflow.
-    command: ["python", "-m", "pytest", "tests", "-q"]
+    command: ["python", "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider"]
 
 volumes:
   pgdata:

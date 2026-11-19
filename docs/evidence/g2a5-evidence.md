@@ -358,3 +358,76 @@ bash -n clean on all seven scripts. The remaining live proofs (b4/b5/b6/g1
 re-runs + g2a's five blocked checks) are recorded as PENDING the egress
 reset — their script changes are the same three-line mechanical pattern,
 guarded, syntax-checked, and g2a.sh (the most complex change) ran live.
+
+## A5.5 — No root-owned files in the repo (2026-11-19)
+
+**The check** (scripts/verify/no-root-files.sh): a throwaway READ-ONLY
+appuser container scans the repo. Detection on Docker Desktop/Windows: host
+files map to root:root WORLD-WRITABLE inside containers, while files CREATED
+by a root container carry the creator's umask (root:root, NOT world-writable)
+— so ``find /app -user root ! -perm -002`` isolates container-created
+artifacts (verified live: .env maps rwxrwxrwx, .pytest_cache was drwxr-xr-x).
+Scope: the SOURCE TREE; uploads/ and data/ are runtime-data directories
+(CLAUDE.md: never touched) — root-owned entries there are listed
+INFORMATIONALLY, never deleted by a script.
+
+**RED run (before any change):**
+
+```
+command:  bash scripts/verify/no-root-files.sh
+expected: FAIL — historical root-owned artifacts exist
+actual:   FAIL, 873 entries: .pytest_cache + __pycache__/*.pyc under
+          app/, migrations/, tests/ — all created by the compose TEST
+          container while it still ran as root (also the count grew from
+          565 to 873 across today's pre-fix suite runs, proving the
+          writer was live)
+verdict:  PASS (RED as mandated)
+```
+
+**The writer fix** (docker-compose.yml, test service): ``user: "1000:1000"``
++ ``-p no:cacheprovider`` in the command (PYTHONDONTWRITEBYTECODE=1 already
+comes from the image). The test container is now repo-write-FREE: bytecode
+disabled, pytest cache disabled, tests write only to tmp_path in the
+container's /tmp. The dev app service and every verify throwaway container
+run the runtime image = appuser (image verified: built 2026-10-29 with
+USER appuser) — they write only uploads/<doc_id>/ as appuser.
+
+**Proof the writer is closed:**
+
+```
+command:  docker compose --profile test run --rm test python -m pytest tests -q
+            (compose mode)   → 406 passed / 0 failed
+command:  ... -e ENABLE_WEB_FALLBACK=false ...  (CI-mode flag)
+            → 406 passed / 0 failed
+command:  container scan after BOTH suites
+expected: root-owned count unchanged (nothing new appeared)
+actual:   873 -> 873 (both scans identical; every entry pre-existing)
+verdict:  PASS
+```
+
+**The historical purge (Farhad approved via explicit ask, per the
+working-tree safety rule):** the 873 entries are gitignored, regenerable
+caches — no source, no data. First attempt (appuser container) hit
+Permission denied on entries inside root-owned 755 dirs; completed with
+the one-shot ``--user root`` container (the documented .incoming
+precedent): pass 1 delete root-owned *.pyc files, pass 2 delete empty
+__pycache__ dirs, pass 3 ``rm -rf /app/.pytest_cache``.
+
+```
+command:  docker run --rm --user root ... sh -c "<three passes>"
+actual:   source-tree root count 873 (post-suite, pre-purge) -> 0
+          git status after purge: only the A5.5 edits — no tracked file harmed
+command:  bash scripts/verify/no-root-files.sh
+actual:   PASS: no root-owned container-created files in the source tree
+verdict:  PASS
+```
+
+**Reported, NOT touched (CLAUDE.md: report, never delete):** 800 root-owned
+entries under ``uploads/`` — historical stored document files/dirs created
+by pre-appuser-era containers (operator CLIs / early verify runs). They
+either back dev-DB document rows or were orphaned when scratch DBs were
+dropped (the bad%00name orphan class). Only the operator can decide their
+fate (e.g. cross-check storage_path against the dev DB, then remove
+genuinely orphaned dirs manually). Current writers cannot add to this set:
+every container that bind-mounts the repo now runs non-root and writes
+only to uploads/<server-generated-id>/ as appuser.
