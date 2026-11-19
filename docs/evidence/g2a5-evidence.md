@@ -201,3 +201,28 @@ self-test; the harness changes below were untouched by both failures.
 **Live integration proof** (run AFTER this commit so the preflight sees a
 clean tree): full g2a harness against the real repo — see the A5.3
 addendum section below for the recorded run.
+
+## A5.3 addendum — the live integration runs (2026-11-19, offline, no LLM)
+
+```
+command:  bash scripts/mutation/run-g2a-mutations.sh      (clean tree; the
+          new preflight itself was exercised and passed)
+RUN 1:    12/13 KILLED, M-P1 PATCH-FAILED — a REAL anchor drift the live
+          run caught: the pre-A3 anchor proc.join(timeout=timeout_s) died
+          with the pipe-deadlock fix (da0731b). P1 retargeted to the
+          current deadline (timeout_s * 1000; finite, so the hang child's
+          60s self-exit still terminates the selection). Commit 8d1996b.
+RUN 2:    13/13 KILLED —
+            Q1..Q4 KILLED, C1/C2 KILLED, G1/G2 KILLED, P1 KILLED (104.89s:
+            the hang child self-exits at 60s, then the deadline assertions
+            fail — the designed termination shape), P2..P5 KILLED.
+          Baselines green (6/15/19 passed). ZERO RESTORE-FAILED lines —
+          every backup→restore was byte-identical through 14+ real
+          patch/run cycles on the real tree.
+verdict:  PASS
+```
+
+Note: the end-of-run `git status` in RUN 2 listed the A5.4 verify-script
+edits being made concurrently — the harness only ever backs up / restores
+its TARGET files (app/*.py), so concurrent edits to scripts/verify/ cannot
+interfere with a run (and this run proves it).
