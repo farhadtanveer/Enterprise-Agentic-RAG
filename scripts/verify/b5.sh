@@ -10,23 +10,39 @@
 # data/audit.db is preserved — its row count is recorded before and after
 # and must be IDENTICAL (C8: never delete; report only).
 #
-# Pinecone (CLAUDE.md): ALL app-side writes go to the dedicated namespace
-# multi-user-test (PINECONE_NAMESPACE on the throwaway container); the
-# cleanup trap deletes the script's vectors BY ID (this run's document_id
-# plus any prior crashed run's b5-note.txt leftovers) before removing the
-# container. rag-v2 and enterprise-agentic-rag are never written.
+# Pinecone (A5.4): ALL app-side writes go to a UNIQUE PER-RUN NAMESPACE
+# (multi-user-test-<stamp>-<rand>, PINECONE_NAMESPACE on the throwaway
+# container). It starts EMPTY and only this run writes to it, so the
+# cleanup trap deletes it WHOLE (delete_all, guarded to the multi-user-
+# test-* prefix) — a killed run can no longer poison a shared namespace
+# (the 55,598-vector lesson). rag-v2 and enterprise-agentic-rag are never
+# written.
 #
 # Re-run:  bash scripts/verify/b5.sh   (needs OPENAI + PINECONE keys in .env)
 # =============================================================================
 set -u
 cd "$(dirname "$0")/../.."
+# The curl calls below rely on MSYS path conversion for their /tmp cookie
+# jars and the /dev/null sink; a GLOBALLY exported MSYS_NO_PATHCONV breaks
+# them silently (found live 2026-11-19: jars landed nowhere -> 401 cascade,
+# curl -o /dev/null -> exit 23). Docker calls scope their own exclusion
+# inside dc() (MSYS2_ARG_CONV_EXCL); docker cp sites keep a COMMAND-SCOPED
+# MSYS_NO_PATHCONV=1 prefix. The global flag must stay unset to run this.
+if [ -n "${MSYS_NO_PATHCONV:-}" ]; then
+  echo "REFUSING: MSYS_NO_PATHCONV is exported globally - it breaks curl's MSYS paths in this script. Unset it first." >&2
+  exit 1
+fi
 dc() { MSYS2_ARG_CONV_EXCL="*" docker "$@"; }
 
 NET=enterprise-agentic-rag_default
 DB=enterprise-agentic-rag-db-1
 APP=rag-verify-b5
 DBV=rag_verify_b5
-NS=multi-user-test
+NS="multi-user-test-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+case "$NS" in
+  multi-user-test-*) ;;   # per-run namespace: cleanup may delete it whole
+  *) echo "REFUSING: bad namespace '$NS'" >&2; exit 1 ;;
+esac
 PORT=8086
 BASE=http://127.0.0.1:$PORT
 TMP=$(mktemp -d)
@@ -57,27 +73,14 @@ print(sqlite3.connect(p).execute('select count(*) from query_audit').fetchone()[
 DOCID=""
 
 cleanup() {
-  # CLAUDE.md: clean up own vectors BY ID in a trap, test namespace only.
-  # Runs while the throwaway container still exists (it has the keys).
-  if [ -n "$DOCID" ]; then
+  # A5.4: the per-run namespace was created EMPTY for this run and only
+  # this run wrote to it — delete it WHOLE (guarded to multi-user-test-*).
+  # No namespace-wide listing (the 55,598-vector lesson).
+  if [[ "$NS" == multi-user-test-* ]]; then
     dc exec -i $APP python -c "
 from app.rag.vectorstore import ensure_index
-idx = ensure_index()
-ids = []
-for page in idx.list(namespace='$NS', limit=100):
-    ids.extend([v if isinstance(v, str) else v.id
-                for v in (page if isinstance(page, list) else page.vectors)])
-if not ids:
-    print('cleanup: test namespace already empty')
-else:
-    fetched = idx.fetch(ids=ids, namespace='$NS').vectors
-    ours = [i for i in ids if i in fetched and ((fetched[i].metadata or {}).get('doc_id') == '$DOCID'
-            or (fetched[i].metadata or {}).get('source') == 'b5-note.txt')]
-    if ours:
-        idx.delete(ids=ours, namespace='$NS')
-        print('cleanup: deleted', len(ours), 'vectors by id')
-    else:
-        print('cleanup: no script-owned vectors found')
+ensure_index().delete(delete_all=True, namespace='$NS')
+print('cleanup: per-run namespace cleared')
 " 2>/dev/null
   fi
   docker rm -f $APP >/dev/null 2>&1
@@ -179,7 +182,7 @@ DOCID=$(printf '%s' "$ING_BODY" | dc exec -i $APP python -c "
 import json, sys
 print(json.loads(sys.stdin.read()).get('document_id', ''))
 " 2>/dev/null)
-ck "ingest returned document_id for the by-id trap cleanup" "uuid" \
+ck "ingest returned document_id (attributable artifacts)" "uuid" \
   "$([ ${#DOCID} -eq 36 ] && echo uuid || echo "len=${#DOCID}")"
 ROWS_FINAL=$(audit_rows)
 ck "data/audit.db row count STILL unchanged after ingest" "$ROWS_BEFORE" "$ROWS_FINAL"
@@ -192,6 +195,6 @@ ck "rag-v2 ids unchanged across the whole run" "$RAGV2_BEFORE" "$RAGV2_AFTER"
 echo "=============================================================="
 echo "RESULT: PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED  ($(date -u '+%Y-%m-%d %H:%M:%SZ'))"
 echo "NOTE: host data/audit.db preserved ($ROWS_FINAL rows) — report, never delete."
-echo "NOTE: Pinecone writes were confined to namespace $NS; the trap deletes the script's vectors by id."
+echo "NOTE: Pinecone writes were confined to the per-run namespace $NS; the trap deleted it whole (A5.4)."
 echo "=============================================================="
 [ "$FAIL" -eq 0 ]

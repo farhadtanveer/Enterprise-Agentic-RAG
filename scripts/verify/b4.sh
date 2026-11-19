@@ -2,11 +2,13 @@
 # =============================================================================
 # scripts/verify/b4.sh — B4 live verification (Part 3 of the review mandate)
 #
-# ALL Pinecone work happens in the DEDICATED TEST NAMESPACE (multi-user-test,
-# the PINECONE_TEST_NAMESPACE setting). The real/legacy namespace
-# (enterprise-agentic-rag) is only ever READ via describe_index_stats before/
-# after, to prove it stayed untouched. The script deletes the test-namespace
-# data when it finishes.
+# ALL Pinecone work happens in a UNIQUE PER-RUN NAMESPACE
+# (multi-user-test-<stamp>-<rand>, A5.4): the namespace starts EMPTY and
+# only this run writes to it, so the cleanup trap deletes it WHOLE
+# (delete_all, guarded to the multi-user-test-* prefix) — a killed run can
+# no longer poison a shared namespace (the 55,598-vector lesson). The
+# real/legacy namespace (enterprise-agentic-rag) is only ever READ via
+# describe_index_stats before/after, to prove it stayed untouched.
 #
 # Per-document verification by EXPLICIT VECTOR-ID ENUMERATION (index.list in
 # the test namespace), never the stats counter. LLM budget: ONE real chat
@@ -18,6 +20,16 @@
 # =============================================================================
 set -u
 cd "$(dirname "$0")/../.."
+# The curl calls below rely on MSYS path conversion for their /tmp cookie
+# jars and the /dev/null sink; a GLOBALLY exported MSYS_NO_PATHCONV breaks
+# them silently (found live 2026-11-19: jars landed nowhere -> 401 cascade,
+# curl -o /dev/null -> exit 23). Docker calls scope their own exclusion
+# inside dc() (MSYS2_ARG_CONV_EXCL); docker cp sites keep a COMMAND-SCOPED
+# MSYS_NO_PATHCONV=1 prefix. The global flag must stay unset to run this.
+if [ -n "${MSYS_NO_PATHCONV:-}" ]; then
+  echo "REFUSING: MSYS_NO_PATHCONV is exported globally - it breaks curl's MSYS paths in this script. Unset it first." >&2
+  exit 1
+fi
 # Git Bash (MSYS) rewrites POSIX-looking arguments into Windows paths before
 # external commands see them — container paths like /tmp/orgdoc must survive.
 # Scope MSYS path-conversion exclusion to docker calls only (see dc() below):
@@ -28,7 +40,11 @@ DB=enterprise-agentic-rag-db-1
 APP=rag-verify-b4
 APP_CAPS=rag-verify-b4-caps
 DBV=rag_verify_b4
-NS=multi-user-test
+NS="multi-user-test-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+case "$NS" in
+  multi-user-test-*) ;;   # per-run namespace: cleanup may delete it whole
+  *) echo "REFUSING: bad namespace '$NS'" >&2; exit 1 ;;
+esac
 LEGACY_NS=enterprise-agentic-rag
 PORT=8082; PORT_CAPS=8085
 BASE=http://127.0.0.1:$PORT
@@ -72,12 +88,15 @@ print(json.dumps({k: v.vector_count for k, v in ns.items()}, sort_keys=True))
 " 2>/dev/null; }
 
 cleanup() {
-  # mandate: delete the TEST NAMESPACE data afterwards (namespace-scoped only)
-  dc exec -i $APP python -c "
+  # A5.4: the per-run namespace was created EMPTY for this run and only
+  # this run wrote to it — delete it whole (guarded to multi-user-test-*).
+  if [[ "$NS" == multi-user-test-* ]]; then
+    dc exec -i $APP python -c "
 from app.rag.vectorstore import ensure_index
 ensure_index().delete(delete_all=True, namespace='$NS')
-print('test namespace cleared')
+print('per-run namespace cleared')
 " >/dev/null 2>&1
+  fi
   docker rm -f $APP $APP_CAPS >/dev/null 2>&1
   dc exec $DB dropdb -U rag --if-exists $DBV >/dev/null 2>&1
   rm -rf "$TMP"

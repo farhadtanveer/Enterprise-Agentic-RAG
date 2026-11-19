@@ -6,16 +6,24 @@
 # (rag_verify_g2a, loopback :8089) with PERSONAL QUOTAS deliberately tiny
 # (USER_UPLOAD_MAX_MB=1, USER_UPLOAD_TOTAL_MB=2, USER_UPLOAD_MAX_DOCS=3,
 # USER_UPLOADS_PER_HOUR=5) so every quota code is exercisable in minutes.
-# ALL Pinecone work happens in the DEDICATED TEST NAMESPACE (multi-user-
-# test); rag-v2 is compared by EXACT vector ids before/after (H9); the trap
-# deletes the script's vectors BY ID. ENABLE_WEB_FALLBACK=false.
+# ALL Pinecone work happens in a UNIQUE PER-RUN NAMESPACE
+# (multi-user-test-<stamp>-<rand>, A5.4): the namespace starts EMPTY and
+# only this run writes to it, so the cleanup trap may delete it WHOLE
+# (delete_all) — no namespace-wide listing anywhere (the 55,598-vector
+# lesson: list+fetch 414s at scale, and a killed run's trap poisons a
+# shared namespace; a killed run now leaves an isolated, self-named
+# namespace). rag-v2 is compared by EXACT vector ids before/after (H9).
+# ENABLE_WEB_FALLBACK=false.
 #
 # Scenarios (docs/tasks/g2.md, live mandate):
-#   quota 413 / 409 quota_total / 409 quota_docs / 429 + Retry-After;
+#   a corrupt docx -> generic 422 (real subprocess parse failure);
+#   a zip-bomb docx -> generic 422 (the pre-parse guard) — BOTH run FIRST
+#     (CHECK 0) against an empty namespace: zero vectors after proves the
+#     rejections happened BEFORE any embedding (A5.4);
+#   quota 413 / 409 quota_total / 409 quota_docs / 429 + Retry-After
+#     (the 413 again leaves the namespace empty — oversize never embeds);
 #   admin exempt from the personal quotas;
 #   two users uploading the SAME filename (independent documents);
-#   a corrupt docx -> generic 422 (real subprocess parse failure);
-#   a zip-bomb docx -> generic 422 (the pre-parse guard);
 #   the parallel-upload race against the total quota (committed sum bounded);
 #   a PRIVATE upload retrievable ONLY by its owner (detail + full chat path).
 #
@@ -24,13 +32,27 @@
 # =============================================================================
 set -u
 cd "$(dirname "$0")/../.."
+# The curl calls below rely on MSYS path conversion for their /tmp cookie
+# jars and the /dev/null sink; a GLOBALLY exported MSYS_NO_PATHCONV breaks
+# them silently (found live 2026-11-19: jars landed nowhere -> 401 cascade,
+# curl -o /dev/null -> exit 23). Docker calls scope their own exclusion
+# inside dc() (MSYS2_ARG_CONV_EXCL); docker cp sites keep a COMMAND-SCOPED
+# MSYS_NO_PATHCONV=1 prefix. The global flag must stay unset to run this.
+if [ -n "${MSYS_NO_PATHCONV:-}" ]; then
+  echo "REFUSING: MSYS_NO_PATHCONV is exported globally - it breaks curl's MSYS paths in this script. Unset it first." >&2
+  exit 1
+fi
 dc() { MSYS2_ARG_CONV_EXCL="*" docker "$@"; }
 
 NET=enterprise-agentic-rag_default
 DB=enterprise-agentic-rag-db-1
 APP=rag-verify-g2a
 DBV=rag_verify_g2a
-NS=multi-user-test
+NS="multi-user-test-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+case "$NS" in
+  multi-user-test-*) ;;   # per-run namespace: cleanup may delete it whole
+  *) echo "REFUSING: bad namespace '$NS'" >&2; exit 1 ;;
+esac
 PORT=8089
 BASE=http://127.0.0.1:$PORT
 TMP=$(mktemp -d)
@@ -98,34 +120,30 @@ print(' '.join(sorted(ids)) if ids else '(empty)')
 " </dev/null 2>/dev/null; }
 
 cleanup() {
-  dc exec -i $APP python -c "
+  # A5.4: the per-run namespace was created EMPTY for this run and only
+  # this run wrote to it — deleting it WHOLE is complete and touches
+  # nothing else (the guard above refused any non multi-user-test-* name).
+  # No namespace-wide listing (the 55,598-vector lesson).
+  if [[ "$NS" == multi-user-test-* ]]; then
+    dc exec -i $APP python -c "
 from app.rag.vectorstore import ensure_index
-idx = ensure_index()
-TRACKED = '''$DOCIDS'''.split()
-if not TRACKED:
-    print('cleanup: no documents were created — nothing to clean')
-else:
-    ids = []
-    for page in idx.list(namespace='$NS', limit=100):
-        ids.extend([v if isinstance(v, str) else v.id
-                    for v in (page if isinstance(page, list) else page.vectors)])
-    if not ids:
-        print('cleanup: namespace already empty')
-    else:
-        fetched = idx.fetch(ids=ids, namespace='$NS').vectors
-        ours = [i for i in ids if i in fetched
-                and str((fetched[i].metadata or {}).get('doc_id')) in TRACKED]
-        if ours:
-            idx.delete(ids=ours, namespace='$NS')
-            print('cleanup: deleted', len(ours), 'vectors by id')
-        else:
-            print('cleanup: no script-owned vectors found')
+ensure_index().delete(delete_all=True, namespace='$NS')
+print('cleanup: per-run namespace cleared')
 " 2>/dev/null
+  fi
   docker rm -f $APP >/dev/null 2>&1
   dc exec $DB dropdb -U rag --if-exists $DBV >/dev/null 2>&1
   rm -rf "$TMP"
 }
 trap cleanup EXIT
+
+ns_count() { # vectors in THIS run's namespace (0 while nothing embedded)
+  dc exec -i $APP python -c "
+from app.rag.vectorstore import ensure_index
+s = ensure_index().describe_index_stats().namespaces or {}
+ns = s.get('$NS')
+print(ns.vector_count if ns else 0)
+" 2>/dev/null; }
 
 mkuser() { # $1 username (admin session; temp credentials -> forced change)
   local made jar="$TMP/$1-jar" csrf login_code pw_code me_code
@@ -258,10 +276,26 @@ with zipfile.ZipFile(sys.argv[1], 'w', compression=zipfile.ZIP_DEFLATED) as z:
     z.writestr('word/document.xml', b'\x00' * (300 * 1024 * 1024))
 " "$TMP/f/bomb.docx" && echo "      zip-bomb fixture written (300MB declared, compressed on disk)"
 
+# ===== CHECK 0: parse failures FIRST, against an empty namespace ===============
+# A5.4: the corrupt docx and the zip-bomb run BEFORE any successful upload —
+# the namespace is empty, so zero vectors after the two 422s proves both
+# rejections happened BEFORE any embedding.
+note "CHECK 0: corrupt + zip-bomb docx (real subprocess parse) -> 422, zero embeddings"
+ck "corrupt docx -> 422 (child parse failure)" "422" "$(up dave "$TMP/f/corrupt.docx" corrupt.docx)"
+ck "zip-bomb docx (300MB declared) -> 422 (pre-parse guard)" "422" "$(up dave "$TMP/f/bomb.docx" bomb.docx)"
+# the S2/B4 contract: parse failures leave the row marked "failed" —
+# what must never exist is an INDEXED row for unparseable content
+ck "no INDEXED row survived either failure" "0" \
+  "$(psql "SELECT count(*) FROM documents WHERE owner_id='$(uid_of dave)' AND status='indexed'")"
+ck "both failures left failed rows" "2" \
+  "$(psql "SELECT count(*) FROM documents WHERE owner_id='$(uid_of dave)' AND status='failed'")"
+ck "rejections happened BEFORE any embedding (namespace still empty)" "0" "$(ns_count)"
+
 # ===== CHECK 1: the quota ladder (alice) =======================================
 note "CHECK 1: quota 413 / 409 quota_total / 409 quota_docs / 429 + admin exempt"
 ck "oversize file (2MB > USER_UPLOAD_MAX_MB=1) -> 413" "413" "$(up alice "$TMP/f/oversize.txt" oversize.txt)"
 ck "413 left no row" "0" "$(psql "SELECT count(*) FROM documents WHERE display_name='oversize.txt'")"
+ck "oversize rejected BEFORE any embedding (namespace still empty)" "0" "$(ns_count)"
 ck "upload A (0.8MB) -> 201" "201" "$(up alice "$TMP/f/a.txt" a.txt)"
 ck "upload B (0.9MB) -> 201 (total 1.7MB)" "201" "$(up alice "$TMP/f/b.txt" b.txt)"
 C_RES=$(upcb alice "$TMP/f/c.txt" c.txt)
@@ -300,17 +334,6 @@ ck "bob cannot read carol's same-named doc (404)" "404" \
   "$(curl -s -o /dev/null -w '%{http_code}' -b "$TMP/bob-jar" $BASE/api/documents/$CAROL_DOC)"
 ckn "bob's listing never shows carol's doc id" "$CAROL_DOC" \
   "$(curl -s -b "$TMP/bob-jar" $BASE/api/documents)"
-
-# ===== CHECK 3: corrupt + zip-bomb docx -> generic 422 =========================
-note "CHECK 3: corrupt docx and zip-bomb docx (real subprocess parse) -> 422"
-ck "corrupt docx -> 422 (child parse failure)" "422" "$(up dave "$TMP/f/corrupt.docx" corrupt.docx)"
-ck "zip-bomb docx (300MB declared) -> 422 (pre-parse guard)" "422" "$(up dave "$TMP/f/bomb.docx" bomb.docx)"
-# the S2/B4 contract: parse failures leave the row marked "failed" —
-# what must never exist is an INDEXED row for unparseable content
-ck "no INDEXED row survived either failure" "0" \
-  "$(psql "SELECT count(*) FROM documents WHERE owner_id='$(uid_of dave)' AND status='indexed'")"
-ck "both failures left failed rows" "2" \
-  "$(psql "SELECT count(*) FROM documents WHERE owner_id='$(uid_of dave)' AND status='failed'")"
 
 # ===== CHECK 4: parallel-upload race against the total quota ===================
 note "CHECK 4: 4 parallel 0.8MB uploads by erin vs the 2MB total quota"
@@ -418,7 +441,7 @@ if [ "$FAIL" -gt 0 ]; then
 fi
 echo "=============================================================="
 echo "RESULT: PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED  ($(date -u '+%Y-%m-%d %H:%M:%SZ'))"
-echo "NOTE: Pinecone writes confined to $NS; trap deletes tracked doc vectors by id."
+echo "NOTE: Pinecone writes confined to the per-run namespace $NS; trap deleted it whole (A5.4)."
 echo "NOTE: chat conversations used: $(ls "$TMP"/conv-* 2>/dev/null | wc -l | tr -d ' ') (budget 4)."
 echo "=============================================================="
 [ "$FAIL" -eq 0 ]

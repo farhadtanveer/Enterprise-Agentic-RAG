@@ -226,3 +226,135 @@ Note: the end-of-run `git status` in RUN 2 listed the A5.4 verify-script
 edits being made concurrently — the harness only ever backs up / restores
 its TARGET files (app/*.py), so concurrent edits to scripts/verify/ cannot
 interfere with a run (and this run proves it).
+
+## A5.4 — Verify scripts: per-run namespace; rejection-before-embedding;
+## the 55,598-vector investigation (2026-11-19)
+
+### 1. The investigation — which script produced the leftovers, and why
+
+```
+command:  docker run (read-only mount) python -c "...describe_index_stats()"
+expected: multi-user-test empty (the 2026-11-16 evidence says 55,598 were
+          "deleted BY ID in batches of 100")
+actual:   {'enterprise-agentic-rag': 27, 'multi-user-test': 55597,
+          'rag-v2': 5}   — the cleanup NEVER completed
+verdict:  FAIL (the documented cleanup did not stick)
+```
+
+**Attribution (converging evidence):** the producer was g2a.sh itself —
+docs/evidence/g2a-evidence.md already attributes the accumulation to "the
+one run killed by a harness timeout — its trap never fired"; the bash EXIT
+trap does not survive a SIGKILLed/timeout-killed process, and g2a.sh ran
+18 times that day. Each killed run left its vectors in the SHARED
+multi-user-test namespace. My purge census found **61 distinct doc_ids**
+(all with test-artifact metadata; zero refused by the doc_id guard) —
+several runs' worth, consistent with multiple killed/incomplete runs.
+~10-11k vectors per full run × several killed runs ≈ 55k.
+
+**Why the cleanup could not recover, mechanically — reproduced live:**
+
+```
+command:  idx.fetch(ids=<500 ids>, namespace='multi-user-test')
+actual:   PineconeApiException: (414) Request-URI Too Large
+verdict:  Pinecone fetch is GET-based; a 500-id URI already 414s. The
+          2026-11-16 "batches of 100" cleanup either was interrupted or
+          silently failed part-way; list-based probes against 55k vectors
+          then 414'd too (recorded in g2a-evidence.md), making every later
+          cleanup attempt harder. CHUNK=100 works — the purge below used it.
+```
+
+### 2. The purge (hygiene; by id, guarded)
+
+scripts/verify/purge-multi-user-test.sh (committed with this step):
+namespace allowlist (`multi-user-test` only), CHUNK=100 (414-proof),
+fail-closed per chunk (delete only after a fetch confirms EVERY id carries
+a metadata doc_id), census aggregated, final re-count.
+
+```
+command:  bash scripts/verify/purge-multi-user-test.sh
+expected: 55,597 listed -> deleted by id in 100-chunks -> final count 0
+actual:   listed 55597; purged 55597/55597 (last chunk 97);
+          census: 61 distinct doc_ids, all with doc_id metadata, 0 refused;
+          final count 55597 -> 0. External re-probe: rag-v2 = 5 (UNTOUCHED),
+          enterprise-agentic-rag = 27 (UNTOUCHED), multi-user-test = 0.
+verdict:  PASS
+```
+
+### 3. The downstream discovery: the Pinecone egress limit is EXHAUSTED
+
+The first re-run of g2a.sh failed 44 checks; the visible-stderr probe shows
+why — EVERY Pinecone READ now fails account-wide:
+
+```
+PineconeApiException: (429)
+{"message": "Request failed. You've reached your egress limit for the
+current month (1000000000 bytes). To continue reading data, upgrade your
+plan."}
+```
+
+Writes (upsert/delete) and describe_index_stats still work (the probe
+upsert+delete returned ids without error). The cap tripped between the
+purge (finished ~09:05Z) and the first g2a attempt (09:33Z). **Honest
+disclosure of contributors:** weeks of verify-script probes that listed +
+fetched 55k leftover vectors whole (the accumulation problem A5.4 exists
+to fix), the 2026-11-16 cleanup fetches, and — my own contribution,
+disclosed — today's purge fetched all 55,597 metadata records (~hundreds
+of MB). Reads recover when the monthly egress resets (2026-12-01) or if
+the plan is upgraded — **Farhad's call** (cost decision).
+
+### 4. The script changes (the fix)
+
+- **Unique per-run namespaces** (b4, b5, b6, g1, g2a):
+  `NS="multi-user-test-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"` + a case guard
+  that REFUSES any name not matching `multi-user-test-*`. Cleanup deletes
+  the run's namespace WHOLE (`delete_all`, guarded again inside cleanup) —
+  safe because the namespace was created empty for this run and only this
+  run writes to it. A killed run can no longer poison a shared namespace;
+  it leaves an isolated, self-named (and datable) namespace instead. No
+  namespace-wide listing anywhere in cleanup (the 414 lesson). The
+  per-document delete proofs (by EXACT recomputed ids) are unchanged.
+  Read-only scripts (b2, b3) keep the shared namespace pin — they never
+  write.
+- **Rejection-before-embedding proofs (g2a.sh):** the corrupt-docx and
+  zip-bomb checks moved to CHECK 0, run FIRST against the empty namespace,
+  each followed by `ns_count()==0`; the oversize 413 in CHECK 1 re-asserts
+  the namespace is still empty. Nothing can embed before a rejection.
+- **MSYS_NO_PATHCONV guard (all seven scripts):** the first live re-run
+  collapsed into a 401 cascade because MY OWN invocation exported
+  MSYS_NO_PATHCONV=1 globally around the script — that flag kills MSYS
+  path conversion for EVERY native binary inside (curl's /tmp cookie jars
+  landed nowhere → 401s; `-o /dev/null` → curl exit 23; the host python
+  got raw /tmp paths). The scripts rely on conversion being ON; dc()
+  scopes the docker exclusion itself. Every script now REFUSES when the
+  flag is globally set, with the reason inline. (Lesson recorded: the
+  CLAUDE.md export rule is for individual docker commands, never around
+  whole scripts.)
+
+### 5. Live run of the changed g2a.sh (correct invocation; per-run namespace)
+
+```
+command:  bash scripts/verify/g2a.sh        (no global MSYS_NO_PATHCONV)
+run:      2026-11-19 09:44:40Z — ns multi-user-test-20261119T094440Z-6718
+result:   PASS=42 FAIL=5 SKIP=0 — ALL FIVE failures are the egress cap:
+            private doc has exact vector ids        (fetch -> 429, empty)
+            private vector tokens are exactly [user:bob]  (upstream empty)
+            bob's answer cites his PRIVATE doc       (retrieval query 429)
+            carol's answer cites the ORG doc         (retrieval query 429)
+            rag-v2 ids unchanged                     (list -> 429, empty)
+          The A5.4-SPECIFIC checks ALL PASSED:
+            rejections happened BEFORE any embedding (namespace empty) 0==0
+            oversize rejected BEFORE any embedding (namespace empty)   0==0
+            the whole quota ladder (413/409x2/429+Retry-After, admin exempt)
+            parallel race 201 201 409 409, committed sum bounded
+            per-run namespace visible in the header; trap deleted it whole
+          2 chat conversations (budget 4). rag-v2 comparison impossible
+          while reads are capped — the stats endpoint confirms rag-v2 = 5
+          before AND after the run (same 5 KB ids as H6 left them).
+verdict:  PASS with 5 environment-blocked checks (recorded, not waved
+          through — they re-run green on the first post-reset/upgrade run).
+```
+
+bash -n clean on all seven scripts. The remaining live proofs (b4/b5/b6/g1
+re-runs + g2a's five blocked checks) are recorded as PENDING the egress
+reset — their script changes are the same three-line mechanical pattern,
+guarded, syntax-checked, and g2a.sh (the most complex change) ran live.

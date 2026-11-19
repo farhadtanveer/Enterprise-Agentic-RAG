@@ -13,6 +13,16 @@
 # =============================================================================
 set -u
 cd "$(dirname "$0")/../.."
+# The curl calls below rely on MSYS path conversion for their /tmp cookie
+# jars and the /dev/null sink; a GLOBALLY exported MSYS_NO_PATHCONV breaks
+# them silently (found live 2026-11-19: jars landed nowhere -> 401 cascade,
+# curl -o /dev/null -> exit 23). Docker calls scope their own exclusion
+# inside dc() (MSYS2_ARG_CONV_EXCL); docker cp sites keep a COMMAND-SCOPED
+# MSYS_NO_PATHCONV=1 prefix. The global flag must stay unset to run this.
+if [ -n "${MSYS_NO_PATHCONV:-}" ]; then
+  echo "REFUSING: MSYS_NO_PATHCONV is exported globally - it breaks curl's MSYS paths in this script. Unset it first." >&2
+  exit 1
+fi
 
 NET=enterprise-agentic-rag_default
 DB=enterprise-agentic-rag-db-1

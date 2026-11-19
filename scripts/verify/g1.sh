@@ -3,11 +3,13 @@
 # scripts/verify/g1.sh — G1 live verification (groups access control)
 #
 # Disposable by design: THROWAWAY app container + scratch database
-# (rag_verify_g1, loopback :8088). ALL Pinecone work happens in the
-# DEDICATED TEST NAMESPACE (multi-user-test); the legacy namespace is only
-# READ via describe_index_stats before/after. The trap deletes the script's
-# vectors BY ID. ZERO Pinecone writes reach rag-v2 (checked externally
-# after the run).
+# (rag_verify_g1, loopback :8088). ALL Pinecone work happens in a UNIQUE
+# PER-RUN NAMESPACE (multi-user-test-<stamp>-<rand>, A5.4): it starts
+# EMPTY and only this run writes to it, so the cleanup trap deletes it
+# WHOLE (delete_all, guarded to the multi-user-test-* prefix) — a killed
+# run can no longer poison a shared namespace (the 55,598-vector lesson).
+# The legacy namespace is only READ via describe_index_stats before/after.
+# ZERO Pinecone writes reach rag-v2 (checked externally after the run).
 #
 # Scenarios (docs/tasks/g1.md PART 1, live mandate):
 #   users A (member of group alpha), B (member of beta), admin (no groups);
@@ -30,13 +32,27 @@
 # =============================================================================
 set -u
 cd "$(dirname "$0")/../.."
+# The curl calls below rely on MSYS path conversion for their /tmp cookie
+# jars and the /dev/null sink; a GLOBALLY exported MSYS_NO_PATHCONV breaks
+# them silently (found live 2026-11-19: jars landed nowhere -> 401 cascade,
+# curl -o /dev/null -> exit 23). Docker calls scope their own exclusion
+# inside dc() (MSYS2_ARG_CONV_EXCL); docker cp sites keep a COMMAND-SCOPED
+# MSYS_NO_PATHCONV=1 prefix. The global flag must stay unset to run this.
+if [ -n "${MSYS_NO_PATHCONV:-}" ]; then
+  echo "REFUSING: MSYS_NO_PATHCONV is exported globally - it breaks curl's MSYS paths in this script. Unset it first." >&2
+  exit 1
+fi
 dc() { MSYS2_ARG_CONV_EXCL="*" docker "$@"; }
 
 NET=enterprise-agentic-rag_default
 DB=enterprise-agentic-rag-db-1
 APP=rag-verify-g1
 DBV=rag_verify_g1
-NS=multi-user-test
+NS="multi-user-test-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+case "$NS" in
+  multi-user-test-*) ;;   # per-run namespace: cleanup may delete it whole
+  *) echo "REFUSING: bad namespace '$NS'" >&2; exit 1 ;;
+esac
 LEGACY_NS=enterprise-agentic-rag
 PORT=8088
 BASE=http://127.0.0.1:$PORT
@@ -80,29 +96,17 @@ if ids:
 " 2>/dev/null; }
 
 cleanup() {
-  dc exec -i $APP python -c "
+  # A5.4: the per-run namespace was created EMPTY for this run and only
+  # this run wrote to it — delete it WHOLE (the guard above refused any
+  # non multi-user-test-* name). No namespace-wide listing (the 55,598
+  # lesson). The per-document proofs above stay by-EXACT-id.
+  if [[ "$NS" == multi-user-test-* ]]; then
+    dc exec -i $APP python -c "
 from app.rag.vectorstore import ensure_index
-idx = ensure_index()
-TRACKED = '''$DOCIDS'''.split()
-if not TRACKED:
-    print('cleanup: no documents were created — nothing to clean')
-else:
-    ids = []
-    for page in idx.list(namespace='$NS', limit=100):
-        ids.extend([v if isinstance(v, str) else v.id
-                    for v in (page if isinstance(page, list) else page.vectors)])
-    if not ids:
-        print('cleanup: namespace already empty')
-    else:
-        fetched = idx.fetch(ids=ids, namespace='$NS').vectors
-        ours = [i for i in ids if i in fetched
-                and str((fetched[i].metadata or {}).get('doc_id')) in TRACKED]
-        if ours:
-            idx.delete(ids=ours, namespace='$NS')
-            print('cleanup: deleted', len(ours), 'vectors by id')
-        else:
-            print('cleanup: no script-owned vectors found')
+ensure_index().delete(delete_all=True, namespace='$NS')
+print('cleanup: per-run namespace cleared')
 " 2>/dev/null
+  fi
   docker rm -f $APP >/dev/null 2>&1
   dc exec $DB dropdb -U rag --if-exists $DBV >/dev/null 2>&1
   rm -rf "$TMP"
