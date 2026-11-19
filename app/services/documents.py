@@ -14,7 +14,7 @@ B6 wires the delete endpoints).
 import hashlib
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
 
@@ -44,6 +44,15 @@ class QuotaExceeded(Exception):
         super().__init__(kind)
 
 
+# A5.2 quota accounting: a quota is a claim on the user's STORAGE. Exactly
+# the documents holding storage count: pending (in-flight — the race-safety
+# proof DEPENDS on pending counting, or parallel uploads oversubscribe) and
+# indexed. Failed documents hold no usable storage (never count); deleted
+# documents have no row at all. The admin near-quota view uses the same
+# tuple so the enforcement view cannot disagree with the enforcement.
+QUOTA_COUNTED_STATUSES = ("pending", "indexed")
+
+
 def enforce_private_quota(db: DBSession, user_id, incoming_size: int) -> None:
     """Race-safe personal-quota gate for PRIVATE uploads (§A14.6 order 2+3).
 
@@ -54,7 +63,9 @@ def enforce_private_quota(db: DBSession, user_id, incoming_size: int) -> None:
     tests/security/test_upload_quota_race.py). Raises QuotaExceeded
     ('total' then 'docs', §A14.6 order); must run INSIDE the transaction
     that inserts the new document row so the lock covers the decision.
-    """
+
+    A5.2: the sum counts QUOTA_COUNTED_STATUSES only — failed documents do
+    not consume quota."""
     settings = get_settings()
     db.execute(
         select(User.id).where(User.id == user_id).with_for_update()
@@ -62,7 +73,11 @@ def enforce_private_quota(db: DBSession, user_id, incoming_size: int) -> None:
     total, count = db.execute(
         select(func.coalesce(func.sum(Document.size_bytes), 0), func.count())
         .select_from(Document)
-        .where(Document.scope == "private", Document.owner_id == user_id)
+        .where(
+            Document.scope == "private",
+            Document.owner_id == user_id,
+            Document.status.in_(QUOTA_COUNTED_STATUSES),
+        )
     ).one()
     if int(total) + incoming_size > settings.user_upload_total_mb * 1024 * 1024:
         raise QuotaExceeded("total")
@@ -281,3 +296,36 @@ def retry_stuck_deletes(db: DBSession, delete_vectors, *, actor_user_id=None) ->
         completed += 1
     db.commit()
     return completed
+
+
+def sweep_stale_pending(db: DBSession, *, actor_user_id=None) -> int:
+    """Sweep (§A5.2): pending rows whose ingest never completed — a process
+    died between TX1 (row inserted, status pending) and TX2 (indexed/
+    failed) — stop consuming quota: older than
+    ``user_upload_pending_stale_minutes`` they are marked 'failed' (error
+    class 'stale_pending'), which excludes them from the quota sum. An
+    in-flight upload is minutes old at most, so it is never swept; that is
+    also why fresh pending rows MUST keep counting until this threshold
+    (the A2 race safety depends on pending counting). Audited — ids and
+    counters only. Returns the number swept."""
+    settings = get_settings()
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        minutes=settings.user_upload_pending_stale_minutes
+    )
+    stale = list(
+        db.execute(
+            select(Document).where(
+                Document.status == "pending", Document.created_at < cutoff
+            )
+        ).scalars().all()
+    )
+    now = datetime.now(timezone.utc)
+    for doc in stale:
+        mark_failed(db, doc, "stale_pending")
+        record_event(
+            db, "stale_pending_swept", actor_user_id=actor_user_id,
+            object_type="document", object_id=doc.id, outcome="ok",
+            details={"age_minutes": int((now - doc.created_at).total_seconds() // 60)},
+        )
+    db.flush()
+    return len(stale)

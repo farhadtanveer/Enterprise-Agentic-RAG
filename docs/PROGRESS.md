@@ -410,7 +410,8 @@ session 2.
 
 | Step | Commit | Proven by |
 |---|---|---|
-| A5.1 upload connection discipline — admin org upload restructured to TX1 (staging → pending row → commit) → ingest with no DB held → TX2; user route already complied, test pins it | (this commit) | pool probe RED first (admin route held its TX across parse/embed: `assert 1 == 0`), then green; admin contract tests unmodified; suite **397 passed / 0 failed** in compose AND CI-mode. Disclosed: legacy /api/ingest (dies at B9) + operator CLI still hold a TX across ingest. |
+| A5.1 upload connection discipline — admin org upload restructured to TX1 (staging → pending row → commit) → ingest with no DB held → TX2; user route already complied, test pins it | `d4dccc9` | pool probe RED first (admin route held its TX across parse/embed: `assert 1 == 0`), then green; admin contract tests unmodified; suite **397 passed / 0 failed** in compose AND CI-mode. Disclosed: legacy /api/ingest (dies at B9) + operator CLI still hold a TX across ingest. |
+| A5.2 quota accounting — QUOTA_COUNTED_STATUSES (pending+indexed): failed docs stop consuming quota (bytes+count), admin near-quota view uses the same accounting; deleted-frees-bytes + pending-still-counts pinned; stale-pending sweep (`user_upload_pending_stale_minutes=30`) + `uploads-sweep-stale` CLI | (this commit) | 7 RED first (failed rows consumed quota; near-quota view listed them; no sweep) → 35 green incl. existing quota/race/CLI suites; suite **406 passed / 0 failed** both modes. What failed first in GREEN: my own test arithmetic (failing upload breached the gate before parse — scenario fixed, no product change). |
 
-Evidence: docs/evidence/g2a5-evidence.md (A5.1 section). Next: A5.2 quota
-accounting (failed/deleted docs must not consume quota; stale pending swept).
+Evidence: docs/evidence/g2a5-evidence.md (A5.1+A5.2 sections). Next: A5.3
+mutation harness (refuse dirty tree; temp backup/restore; byte-identical).

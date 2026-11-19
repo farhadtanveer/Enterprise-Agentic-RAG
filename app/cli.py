@@ -305,6 +305,23 @@ def documents_retry_deleting() -> None:
         db.close()
 
 
+@cli.command("uploads-sweep-stale")
+def uploads_sweep_stale() -> None:
+    """Sweep (§A5.2): mark stale 'pending' uploads 'failed' so they stop
+    consuming quota (a process died between TX1 and TX2). Rows newer than
+    USER_UPLOAD_PENDING_STALE_MINUTES are in-flight uploads and are never
+    touched. Audited (stale_pending_swept, CLI actor None)."""
+    from app.services import documents as docs_service
+
+    db = _session()
+    try:
+        swept = docs_service.sweep_stale_pending(db)
+        db.commit()
+        click.echo(f"Swept {swept} stale pending upload(s) to 'failed'.")
+    finally:
+        db.close()
+
+
 @cli.command("delete-document")
 @click.argument("document_id")
 def delete_document(document_id: str) -> None:

@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     user_upload_total_mb: int = 250  # per user across their PRIVATE docs
     user_upload_max_docs: int = 50  # per user, private docs
     user_uploads_per_hour: int = 10  # per-user sliding window on uploads
+    # A5.2: a 'pending' row older than this is orphaned (its process died
+    # between TX1 and TX2) — the stale-pending sweep marks it failed so it
+    # stops consuming quota. In-flight uploads are minutes old; 30 gives a
+    # wide margin over the 60s parser timeout.
+    user_upload_pending_stale_minutes: int = 30
     # --- G2 A3 parser subprocess limits (§A14.6, DECISION #8) ---
     # The parser runs in a spawned subprocess: a poisoned file can kill the
     # CHILD, never the app. Any child failure (timeout, kill, cap refusal)

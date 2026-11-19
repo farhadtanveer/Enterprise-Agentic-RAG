@@ -339,6 +339,9 @@ def list_documents(
         }
 
     # --- users over or NEAR quota (the enforcement view, per A14.6) --------
+    # A5.2: the SAME accounting as enforce_private_quota — only statuses
+    # that actually hold the user's storage (pending/indexed) can push a
+    # user into this view; failed rows do not consume quota.
     near_quota_users = []
     if total_private > 0:
         settings = get_settings()
@@ -348,7 +351,10 @@ def list_documents(
                 func.count().label("docs"),
                 func.coalesce(func.sum(Document.size_bytes), 0).label("bytes"),
             )
-            .where(Document.scope == "private")
+            .where(
+                Document.scope == "private",
+                Document.status.in_(documents_service.QUOTA_COUNTED_STATUSES),
+            )
             .group_by(Document.owner_id)
         ).all()
         max_bytes = settings.user_upload_total_mb * 1024 * 1024
