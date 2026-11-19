@@ -55,6 +55,12 @@ Task files: docs/tasks/.
   upload_dir, never follows symlinks, never deletes directories derived from
   DB values or settings. Storage names are server-generated.
 - Tests that delete anything use tmp_path only, never settings defaults.
+- Never discard uncommitted work: no git checkout, restore, stash drop or
+  reset on files with uncommitted changes. Commit (even as "wip:") before
+  running any tool that edits files (mutation harness, formatters).
+- Verify scripts use a unique per-run test namespace and never embed huge
+  synthetic documents. Containers that mount the repo must not create
+  root-owned files.
 
 ## Test and data safety
 
