@@ -405,3 +405,12 @@ Part A (quotas race-safety, parser subprocess limits, admin private-doc
 leak check) before ANY further work. PART B (share flow, versions,
 governance, citations) is his explicit go/no-go per docs/tasks/g2.md
 session 2.
+
+## 2026-11-19 — G2 PART A5 started (Farhad's go received; runs BEFORE Part B)
+
+| Step | Commit | Proven by |
+|---|---|---|
+| A5.1 upload connection discipline — admin org upload restructured to TX1 (staging → pending row → commit) → ingest with no DB held → TX2; user route already complied, test pins it | (this commit) | pool probe RED first (admin route held its TX across parse/embed: `assert 1 == 0`), then green; admin contract tests unmodified; suite **397 passed / 0 failed** in compose AND CI-mode. Disclosed: legacy /api/ingest (dies at B9) + operator CLI still hold a TX across ingest. |
+
+Evidence: docs/evidence/g2a5-evidence.md (A5.1 section). Next: A5.2 quota
+accounting (failed/deleted docs must not consume quota; stale pending swept).

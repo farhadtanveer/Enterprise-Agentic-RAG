@@ -14,7 +14,7 @@ private documents never appear per-document (no filenames, DECISION #1).
 """
 import logging
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
@@ -420,35 +420,51 @@ async def upload_org_document(
     if file.size is not None and file.size > max_bytes:
         raise HTTPException(status_code=413, detail="File exceeds MAX_UPLOAD_MB")
 
-    doc = documents_service.create_document(
-        db, scope="org", owner_id=None, display_name=display_name,
-        storage_path="", checksum="", size_bytes=0, mime_suffix=suffix or None,
-    )
+    # Stream to a SERVER-GENERATED staging file first (F1 rules hold: pure
+    # basename inside upload_dir, exclusive create, per-file cap enforced
+    # mid-stream). The document row is only created inside TX1 below — a
+    # rejected upload leaves NO row (same shape as the user route).
     try:
-        dest, size, checksum = documents_service.save_upload_stream(
-            file.file, dest_dir=Path(settings.upload_dir) / str(doc.id),
-            storage_name=f"{doc.id}{suffix}",  # F1: server-generated
+        part_path, size, checksum = documents_service.save_upload_stream(
+            file.file, dest_dir=Path(settings.upload_dir) / ".incoming",
+            storage_name=f"{uuid4().hex}.part",
             chunk_validator=make_text_validator() if suffix in {".txt", ".md"} else None,
+            max_mb=settings.max_upload_mb,
         )
     except documents_service.UploadTooLarge:
-        db.rollback()
         raise HTTPException(status_code=413, detail="File exceeds MAX_UPLOAD_MB") from None
     except documents_service.UploadRejected:
-        db.rollback()
         raise HTTPException(status_code=422, detail="Invalid storage name") from None
     except ContentRejected:
-        db.rollback()
         raise HTTPException(
             status_code=422,
             detail="Text upload must be valid UTF-8 without NUL bytes",
         ) from None
-    doc.storage_path = str(dest)
-    doc.size_bytes = size
-    doc.checksum = checksum
-    db.flush()
+
+    # TX1 (§A5.1 connection discipline): the pending row + the staging-file
+    # rename commit BEFORE any parse/embed work — no DB connection or
+    # transaction is held across the ingest (pool-proven by
+    # tests/test_upload_pool_discipline.py).
+    try:
+        doc = documents_service.create_document(
+            db, scope="org", owner_id=None, display_name=display_name,
+            storage_path="", checksum="", size_bytes=size, mime_suffix=suffix or None,
+        )
+        final_dir = Path(settings.upload_dir) / str(doc.id)
+        final_dir.mkdir(parents=True, exist_ok=True)
+        final_path = final_dir / f"{doc.id}{suffix}"
+        part_path.replace(final_path)  # bytes are already on disk
+        doc.storage_path = str(final_path)
+        doc.checksum = checksum
+        db.commit()  # releases the connection for the ingest below
+    except Exception:
+        part_path.unlink(missing_ok=True)  # our own staging file only
+        db.rollback()
+        raise
+
     with ingest_gate:  # DECISION #7: bounded parse/embed concurrency
         try:
-            loaded = load_file(dest)
+            loaded = load_file(final_path)
             chunks = chunk_documents(loaded)
         except Exception as exc:
             documents_service.mark_failed(db, doc, "unparseable")
