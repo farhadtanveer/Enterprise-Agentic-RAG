@@ -1,6 +1,7 @@
 import codecs
 import logging
 import multiprocessing
+import sys
 import threading
 import time
 import zipfile
@@ -87,13 +88,31 @@ class ParseFailed(Exception):
 
 
 def _apply_memory_limit(limit_mb: int) -> None:
+    """Apply the child RLIMIT_AS (POSIX). RLIMIT_AS is Linux-only (A5.6):
+    on an unsupported platform this degrades EXPLICITLY — a clear warning
+    (the operator must know the memory cap is not applied) — and never
+    crashes at import or takes the parse down: the subprocess + hard
+    timeout still bound the parse."""
     try:
         import resource
 
         limit = limit_mb * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
     except ImportError:
-        pass  # non-POSIX host: the subprocess + timeout still bound the parse
+        logger.warning(
+            "RLIMIT_AS unavailable: no 'resource' module on this platform "
+            "(%s) — the parser memory cap is skipped; the subprocess + hard "
+            "timeout still bound the parse",
+            sys.platform,
+        )
+    except AttributeError:
+        # 'resource' exists but has no RLIMIT_AS (some non-Linux POSIX)
+        logger.warning(
+            "RLIMIT_AS unavailable: 'resource' has no RLIMIT_AS on this "
+            "platform (%s) — the parser memory cap is skipped; the "
+            "subprocess + hard timeout still bound the parse",
+            sys.platform,
+        )
 
 
 def _parse_worker(conn, path_str: str) -> None:

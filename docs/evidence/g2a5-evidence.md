@@ -431,3 +431,41 @@ fate (e.g. cross-check storage_path against the dev DB, then remove
 genuinely orphaned dirs manually). Current writers cannot add to this set:
 every container that bind-mounts the repo now runs non-root and writes
 only to uploads/<server-generated-id>/ as appuser.
+
+## A5.6 — RLIMIT_AS degrades EXPLICITLY off Linux (2026-11-19)
+
+**Tests first** (tests/test_parser_platform.py — the Linux test container
+cannot BE the unsupported platform, so the tests STUB the ``resource``
+module; that stub is the unsupported platform):
+
+```
+command:  docker compose --profile test run --rm test \
+            python -m pytest tests/test_parser_platform.py -q
+RED run:
+  expected: the two degradation tests RED (silent pass / uncaught
+            AttributeError); the import-safety pin already green
+  actual:   2 failed, 1 passed —
+            FAILED missing_resource_module_degrades_explicitly
+                   (ImportError path degraded SILENTLY — no message)
+            FAILED resource_without_rlimit_as_degrades_explicitly
+                   (AttributeError path NOT CAUGHT — would crash the parse
+                   child and surface as a misleading ParseFailed('crashed'))
+  verdict:  PASS (RED as mandated)
+GREEN run: 3 passed; parser suite (tests/test_parser_subprocess.py)
+           14 passed unchanged — the POSIX memory cap still works.
+```
+
+**The fix** (app/services/ingestion.py, ``_apply_memory_limit``): the
+silent ``pass`` became a WARNING naming the platform, the reason, and what
+still bounds the parse ("subprocess + hard timeout"); a second handler
+catches AttributeError (``resource`` present without ``RLIMIT_AS`` on some
+non-Linux POSIX). Import safety is pinned by a REAL subprocess test
+(``sys.modules['resource'] = None; import app.services.ingestion`` →
+exit 0) — the module never touches ``resource`` at import time.
+
+**Full suite after the change:** 409 passed / 0 failed in compose AND
+CI-mode (was 406 + 3 new tests).
+
+```
+verdict: PASS
+```
