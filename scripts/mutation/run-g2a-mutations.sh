@@ -120,9 +120,14 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then   # source-safe: no mutants when sour
 
   echo "--- mutants: subprocess limits ---"
   mutate P1 app/services/ingestion.py "$SEL_PARSE" \
-    "    proc.join(timeout=timeout_s)" \
-    "    proc.join(timeout=10**9)"
-  # ^ the hard timeout disarmed (the hang child decides when the parent moves on)
+    "    deadline = time.monotonic() + timeout_s" \
+    "    deadline = time.monotonic() + timeout_s * 1000"
+  # ^ the hard wall-clock deadline disarmed 1000x (the hang child, not the
+  # deadline, decides when the parent moves on). Anchor updated by the
+  # A5.3 live integration run: the pre-A3 anchor (proc.join(timeout=...))
+  # died with the pipe-deadlock fix da0731b — the deadline now lives in
+  # the drain-while-running poll loop. Finite 1000x so the hang child's
+  # 60s self-exit still terminates the selection (same shape as before).
 
   mutate P2 app/services/ingestion.py "$SEL_PARSE" \
     '        if len(docs) > settings.parser_max_pages:  # pages cap
