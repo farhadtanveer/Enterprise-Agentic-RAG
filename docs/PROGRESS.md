@@ -483,3 +483,15 @@ pgvector P2 (migration 0006 document_chunks) ONLY on Farhad's review of P1
 CI confirmed: run 45141247806 on ffe04e8 — **test success, sast success,
 audit success** (test job on the pgvector/pgvector:pg18 service with the
 bootstrap-existing.sql step; evidence §CI updated).
+
+## 2026-11-23 — pgvector P2 complete (migration 0006 document_chunks) + runbook fix
+
+| Step | Commit | Proven by |
+|---|---|---|
+| P2: migration 0006 `document_chunks` (PK (document_id, chunk_index); FK documents ON DELETE CASCADE; embedding VECTOR(1536) dimension-LOCKED; embedding_model/embedding_version(1); generated tsvector GENERATED ALWAYS to_tsvector('simple') STORED; page nullable; created_at now()) + app/models/document_chunk.py (Vector UserDefinedType — NO pgvector-python; Computed column) + 12 schema tests RED-first + docs/db-image-swap.md amended per the operator's real run (dump from the OLD volume via a temporary pg-old container — the old db container may already be replaced; pg_dump -f INSIDE + docker cp, restore via docker cp + pg_restore, bootstrap via docker cp + psql -f; PowerShell variants alongside bash; no shell redirection for data files anywhere) | (this commit) | RED: 11/11 failed (table+module absent) → GREEN: 22/22 (12 schema + 10 migration-chain incl. downgrade-to-base through 0006). GREEN-phase failure was test-side (3-dim fixtures vs the locked 1536 column — the lock WORKED) and became the explicit pin test_embedding_dimension_is_locked_at_1536. Full suite **423/0 compose AND CI-mode**; no-root-files.sh PASS. NO new Settings (embedding_dimensions lands at P3 with its first reader — no decorative settings). Evidence: docs/evidence/pgvector-p2-evidence.md. Dev DB note: 0006 applies at the operator's next app start, not applied by the session. |
+
+## EXACT NEXT STEP
+
+pgvector P3 (VectorStore Protocol + PgVectorStore exact-search + contract
+tests on BOTH backends, Pinecone still default) ONLY on Farhad's review of
+P2. STOP now — checkpoint: "Farhad reviews schema".
