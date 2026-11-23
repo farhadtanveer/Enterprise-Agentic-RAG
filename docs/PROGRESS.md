@@ -442,3 +442,17 @@ A5 is now fully closed including CI. Final report: **docs/review/a5-final-report
 **PART A5 COMPLETE and CI green — STOP and report to Farhad.** Wait for his
 review of A5 and his PART B go/no-go (docs/tasks/g2.md session 2). Pinecone
 read-side checks stay PENDING until 2026-12-01 or a plan upgrade (his call).
+
+## 2026-11-23 — pgvector DESIGN complete (docs/tasks/pgvector-a.md; design only)
+
+| Step | Commit | Proven by |
+|---|---|---|
+| docs/pgvector-design.md — all 12 mandated sections: inventory (13 production files / ~20 test files / 8 verify scripts / 6 infra items, with file:line refs), VectorStore Protocol + dual-impl period, document_chunks schema (derived access — recommended), exact-first search + HNSW/iterative-scan measurement plan, resolver-as-SQL + RLS second layer (roles, SET LOCAL, fail-closed, bypass tests), hybrid OFF-by-default, embedding provider abstraction (base_url/dim settings; model-change procedure), migration plan (re-embed from uploads/, parity gate BLOCKED on Pinecone reads until 2026-12-01, rollback, 27 legacy vectors + rag-v2 listed for the operator), operations, G2 Part B effect (+ g2.md edits incl. 0006→0007 renumber), test plan, risks/Qdrant-rejected, phased P1–P10 with review checkpoints, 10 DECISIONS FOR FARHAD | (this commit) | Design-only task: NO code, NO migrations, NO data changes; ZERO Pinecone calls (code reading only — the egress cap constraint honored). Settings-audit discipline respected for every new setting named in the design. |
+
+## EXACT NEXT STEP
+
+**pgvector design COMPLETE — STOP and report to Farhad.** Implementation
+starts at P1 only on his go, one phase per commit with the §12.3 review
+checkpoints (schema P2, RLS P4, parity P6, cutover P7). The parity gate
+(P6) additionally needs Pinecone READS — blocked until the A5.4 cap
+recovers (2026-12-01) or a plan upgrade; P1–P5 are fully local.
