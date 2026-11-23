@@ -456,3 +456,15 @@ starts at P1 only on his go, one phase per commit with the §12.3 review
 checkpoints (schema P2, RLS P4, parity P6, cutover P7). The parity gate
 (P6) additionally needs Pinecone READS — blocked until the A5.4 cap
 recovers (2026-12-01) or a plan upgrade; P1–P5 are fully local.
+
+## 2026-11-23 — pgvector PART 0: design amendments (Farhad's DECISIONS #1–#10)
+
+| Step | Commit | Proven by |
+|---|---|---|
+| docs/pgvector-design.md amended per docs/tasks/pgvector-p1.md PART 0: 0.1 RLS function distinct `p_` params (the column-shadowing bug that would let any group member read ALL group documents), STABLE (not IMMUTABLE), SECURITY INVOKER explicit, NULLIF unwrapping; 0.2 fail-closed corrected to ORG-ONLY + the MANDATED group-A/B bypass test; 0.3 RLS scoped to document_chunks with explicit INSERT/UPDATE/DELETE policies (manage matrix) + cross-audience-write tests; 0.4 AccessContext (user_id | ORG_ONLY) replaces both the token list and the $in dict across Protocol/state/legacy chat; 0.5 orphan-files REPORT-ONLY CLI added (§9, lands with P8); 0.6 the 2000-dim HNSW ceiling of `vector` (halfvec beyond) + DECISION #10 golden-question gate (pgvector ALONE, ≥20 questions, docs/evidence/pgvector-golden.md; Pinecone parity optional — P6 UNBLOCKED from the egress cap) | (this commit) | Design-doc-only diff; §12.4 records all ten decisions as CLOSED/CHANGED; §11.4 mutation M-V6 pins the shadowing regression class. |
+
+## EXACT NEXT STEP
+
+pgvector PART 1 (docs/tasks/pgvector-p1.md): P1 image swap + initdb roles +
+runbook + extension test + evidence, one commit, no app behavior change,
+no volume deletes, zero Pinecone.

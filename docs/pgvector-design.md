@@ -4,8 +4,9 @@ Task: docs/tasks/pgvector-a.md (design only — no code, no migrations, no data
 changes, **zero Pinecone calls**; the usage cap is exhausted until
 2026-12-01, so this document was written from code reading only).
 Amends docs/backend-design.md (§A7, §A9.1) and docs/tasks/g2.md (Part B).
-Date: 2026-11-23. Design doc only — every numbered section below was
-mandated by the task.
+Date: 2026-11-23 (PART 0 amendments applied same day — Farhad's DECISIONS
+#1–#10 recorded in §12.4; #3 became the AccessContext seam, #10 CHANGED the
+cutover gate to a golden-question check against pgvector alone).
 
 **Why (from the task, with what the code confirms):** no external vendor or
 cost; data stays in our database; access control becomes SQL; delete/copy/
@@ -103,7 +104,7 @@ g2a mutation target) — targets updated per-phase.
 - **Tests: ~20 files touch the three seams.** 12 route/CLI-level files
   unchanged (names preserved); 3 graph-seam files unchanged (same); 4
   store-seam files + test_vectorstore_index.py become contract tests (§11);
-  new: contract suite, RLS suite, recall benchmark, parity harness.
+  new: contract suite, RLS suite, recall benchmark, golden-question gate.
 - **Scripts: 8** verify scripts lose the Pinecone machinery and gain the
   scratch-DB pattern they already use (rag_verify_b5/b6/g1 —
   docs/PROGRESS.md 2026-11-12).
@@ -116,7 +117,24 @@ g2a mutation target) — targets updated per-phase.
 
 ### 2.1 The VectorStore Protocol
 
+**The access seam is an AccessContext (Farhad's DECISION #3 — replaced the
+draft's audience-token list and the Pinecone `$in` dict alike):**
+
 ```python
+@dataclass(frozen=True)
+class AccessContext:
+    """Who is asking. Exactly two shapes:
+    - AccessContext(user=<uuid>) — an authenticated user; retrieval and RLS
+      run in THEIR identity (audiences derived in SQL, §3; RLS SET LOCAL,
+      §5).
+    - ORG_ONLY — a module constant; legacy /api/chat (D8) and any future
+      context-free path see ONLY org documents (the corrected fail-closed
+      semantics, §5.3).
+    The Pinecone adapter renders its own prefixed tokens from the context
+    via the resolver; nothing Pinecone-shaped crosses the seam."""
+    user: UUID | None
+    # ORG_ONLY = AccessContext(user=None)
+
 class VectorStore(Protocol):
     def add_chunks(self, chunks: list[Document], *, doc_id: UUID,
                    scope: str, owner_id: UUID | None, source_name: str,
@@ -128,13 +146,13 @@ class VectorStore(Protocol):
     def delete_document(self, doc_id: UUID) -> None: ...
     """Idempotent delete of every chunk of doc_id (today :202-211)."""
 
-    def search(self, query_text: str, *, audiences: list[str],
-               user_id: UUID, k: int | None = None) -> list[Document]: ...
+    def search(self, query_text: str, *, context: AccessContext,
+               k: int | None = None) -> list[Document]: ...
     """Embed query_text (§7 provider), k-NN restricted to the caller's
-    audiences (§3/§4 SQL) AND the RLS layer (§5). Returns LangChain
-    Documents whose metadata carries at least:
+    audience (§3/§4 SQL, derived from the context) AND the RLS layer (§5).
+    Returns LangChain Documents whose metadata carries at least:
     doc_id, scope, source (display name — citations, workflow.py:188-193),
-    page (int | None), created_at. Refuses empty audiences (the §A7
+    page (int | None), created_at. Refuses a missing context (the §A7
     fail-closed rule, today :131-135)."""
 
     def copy_chunks(self, source_doc_id: UUID, target_doc_id: UUID) -> int: ...
@@ -173,8 +191,9 @@ user, §5) — not the `$in` dict.
 A transitional settings field `vector_store: str = "pinecone"` selects the
 adapter (factory in app/rag/vectorstore.py). This is a MIGRATION DEVICE,
 not a permanent mode flag: the Pinecone implementation, the setting, and
-the `$in` dict all die in the removal phase (P10, §12) once parity is
-proven — the same end-state discipline as the B9 legacy-route removal.
+the `$in` dict all die in the removal phase (P10, §12) once the
+   golden-question gate has passed — the same end-state discipline as the
+   B9 legacy-route removal.
 Flagged for Farhad because it touches the no-flag rule (DECISION #4).
 
 ### 2.3 The seams the graph and callers see (compatibility)
@@ -182,22 +201,24 @@ Flagged for Farhad because it touches the no-flag rule (DECISION #4).
 The module `app/rag/vectorstore.py` keeps function-level entry points so
 the 15 seam-mocking test files do not move:
 
-- `get_retriever(filter_or_audiences)` stays the graph's retrieval seam
-  (workflow.py:82 unchanged in shape; the filter argument becomes the
-  audience token list — legacy chat passes `["org"]` where it passed
-  `ORG_ONLY_FILTER`, routes.py:58).
+- `get_retriever(context)` stays the graph's retrieval seam (workflow.py:82
+  unchanged in shape; the argument becomes the AccessContext — legacy chat
+  passes `ORG_ONLY` where it passed `ORG_ONLY_FILTER`, routes.py:58).
 - `add_documents(...)`, `delete_document_vectors(doc_id)` keep their exact
   signatures and dispatch to the configured adapter.
-- `AgentState.retrieval_filter` (state.py:27) carries the audience token
-  list instead of the Pinecone dict; conversations.py:226 calls
-  `audiences_for(user)` instead of `filter_for(user)`.
+- `AgentState.retrieval_filter` (state.py:27) becomes
+  `access_context: AccessContext` (the field is renamed to say what it
+  is); conversations.py:226 builds `AccessContext(user=user.id)` inside
+  TX1 — the resolver's `audiences_for` remains the resolver-level source
+  of truth for what that context resolves to.
 
 **Contract change to declare, none to hide:** the `$in`-dict pins in
 tests/security/test_access_resolver.py and test_retrieval_acl.py become
-token-list pins (same assertions, same strength — the dict was Pinecone's
-rendering of exactly that list). Everything else in the A14.8 suite runs
-unchanged (A14.8's own header: "backend-agnostic — run unchanged against
-pgvector", docs/backend-design.md:1387).
+AccessContext pins (same assertions, same strength — the dict was
+Pinecone's rendering of exactly the audiences the context resolves to).
+Everything else in the A14.8 suite runs unchanged (A14.8's own header:
+"backend-agnostic — run unchanged against pgvector",
+docs/backend-design.md:1387).
 
 Connection discipline (§A8): today the graph run holds ZERO DB resources
 (conversations.py:230-233). Under pgvector the search is itself a DB call
@@ -244,15 +265,16 @@ CREATE INDEX ix_document_chunks_document_id ON document_chunks (document_id);  -
   duplicated onto chunks:
 
 ```sql
--- THE one access predicate (single source of truth in SQL, §5 reuses it):
+-- THE one access predicate (single source of truth in SQL, §5 reuses it).
+-- p_uid comes from the AccessContext (NULL for ORG_ONLY):
 AND (
        d.scope = 'org'
-    OR (d.scope = 'private' AND d.owner_id = :uid)
-    OR (d.scope = 'group' AND EXISTS (
+    OR (d.scope = 'private' AND d.owner_id = :p_uid)
+    OR (d.scope = 'group' AND :p_uid IS NOT NULL AND EXISTS (
           SELECT 1 FROM group_memberships m
           JOIN groups g ON g.id = m.group_id
           WHERE m.group_id = d.group_id
-            AND m.user_id  = :uid
+            AND m.user_id  = :p_uid
             AND g.is_active))              -- archived groups in NO audience (H13)
     )
 AND d.status = 'indexed'                   -- pending/failed/deleting never retrieve
@@ -289,6 +311,15 @@ SET maintenance_work_mem = '1GB';          -- session-level, index builds only
 CREATE INDEX ix_chunks_hnsw ON document_chunks
   USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 ```
+
+**Dimension ceiling (PART 0 0.6):** the `vector` type indexes at most
+**2000 dimensions** per vector (storage goes higher; indexes do not).
+`text-embedding-3-small` (1536) indexes fine; `text-embedding-3-large`
+(3072) would NOT be indexable as `vector` — a larger-dimension model
+means `halfvec` (up to 4000 indexable, half precision) or a
+dimension-reducing model choice. This is recorded in the §7 change
+procedure so a future model switch discovers the constraint in the design,
+not in a failed CREATE INDEX.
 
 **Recall under restrictive filters (the known pgvector failure mode):**
 HNSW + WHERE is post-filtering — a selective predicate can return < k rows
@@ -338,87 +369,154 @@ audiences.
   Created by an initdb script (docker/initdb/, the mount already exists —
   docker-compose.yml `db.volumes`) alongside `CREATE EXTENSION vector`.
 
-### 5.2 Policies (documents + document_chunks)
+### 5.2 Policies — document_chunks ONLY at P4 (PART 0 amendment 0.3)
 
-One SQL predicate function, used by BOTH the search WHERE and the policies
-(single source of truth, §3):
+**Scope:** RLS lands on `document_chunks` FIRST (the crown-jewel content
+table). The `documents` table stays under application rules (can_read,
+listings, admin surfaces) until the admin paths that touch it (metadata
+listing of org/group documents, delete-any, quota counters, sweeps) are
+re-designed for a policy-filtered world — a documents policy too early
+would silently break the C4 aggregates and the §A9.1-legacy admin sweeps.
+Extending RLS to `documents` (and later conversations/messages) is its own
+reviewed phase.
+
+**Read predicate — ONE function, distinct parameter names.** Parameters
+are prefixed `p_` so they can NEVER shadow column names (the draft's
+`m.group_id = group_id` compared the column to itself — under PL/pgSQL/SQL
+name resolution the column wins, making EVERY group member able to read
+EVERY group document; caught in review, PART 0 0.1). `STABLE` (not
+IMMUTABLE — it reads `group_memberships`, which changes; an IMMUTABLE
+marker would let the planner cache results across statements).
+`SECURITY INVOKER` (the default, stated explicitly so no later
+`SECURITY DEFINER` "convenience" sneaks in). The user id is unwrapped with
+`NULLIF(current_setting('app.user_id', true), '')::uuid` — an EMPTY string
+setting becomes NULL, not a cast error (a cast error would 500 queries;
+NULL fail-closes them instead):
 
 ```sql
-CREATE FUNCTION app_can_read_document(scope text, owner_id uuid, group_id uuid, uid uuid)
-RETURNS boolean LANGUAGE sql STABLE IMMUTABLE PARALLEL SAFE AS $$
-  SELECT scope = 'org'
-      OR (scope = 'private' AND owner_id = uid)
-      OR (scope = 'group' AND EXISTS (
+CREATE FUNCTION app_can_read_chunk(p_scope text, p_owner_id uuid,
+                                   p_group_id uuid, p_uid uuid)
+RETURNS boolean LANGUAGE sql STABLE SECURITY INVOKER PARALLEL SAFE AS $$
+  SELECT p_scope = 'org'
+      OR (p_scope = 'private' AND p_owner_id = p_uid)
+      OR (p_scope = 'group' AND p_uid IS NOT NULL AND EXISTS (
             SELECT 1 FROM group_memberships m
             JOIN groups g ON g.id = m.group_id
-            WHERE m.group_id = group_id AND m.user_id = uid AND g.is_active));
+            WHERE m.group_id = p_group_id AND m.user_id = p_uid
+              AND g.is_active));
 $$;
 
-ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p_documents_read ON documents FOR SELECT TO rag_app
-  USING (app_can_read_document(scope, owner_id, group_id,
-                               current_setting('app.user_id', true)::uuid));
 ALTER TABLE document_chunks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p_chunks_read ON document_chunks FOR SELECT TO rag_app
   USING (EXISTS (SELECT 1 FROM documents d
                  WHERE d.id = document_id
-                   AND app_can_read_document(d.scope, d.owner_id, d.group_id,
-                       current_setting('app.user_id', true)::uuid)));
+                   AND app_can_read_chunk(d.scope, d.owner_id, d.group_id,
+                         NULLIF(current_setting('app.user_id', true), '')::uuid)));
 ```
 
-(write-path policies: INSERT/UPDATE/DELETE mirror today's manage rules;
-delete-any-admin is the one admin path — it operates on rows the §9
-SECURITY DEFINER counters and operator CLIs already handle, see below.)
+**Write policies — explicit (PART 0 0.3).** Chunks follow their document's
+manage rules (the `_can_manage` matrix, app/api/documents.py:91-98: private
+→ owner, group → editor of THAT group, org → admin; C3 admin delete-any):
+
+```sql
+CREATE FUNCTION app_can_manage_chunk(p_document_id uuid, p_uid uuid)
+RETURNS boolean LANGUAGE sql STABLE SECURITY INVOKER PARALLEL SAFE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM documents d
+    WHERE d.id = p_document_id
+      AND ( (d.scope = 'private' AND d.owner_id = p_uid)
+         OR (d.scope = 'group' AND p_uid IS NOT NULL AND EXISTS (
+              SELECT 1 FROM group_memberships m
+              WHERE m.group_id = d.group_id AND m.user_id = p_uid
+                AND m.role = 'editor'))          -- C1: editor-ness per group
+         OR (p_uid IS NOT NULL AND EXISTS (
+              SELECT 1 FROM users u
+              WHERE u.id = p_uid AND u.role = 'admin' AND u.is_active)) ));
+$$;
+
+CREATE POLICY p_chunks_insert ON document_chunks FOR INSERT TO rag_app
+  WITH CHECK (app_can_manage_chunk(document_id,
+                 NULLIF(current_setting('app.user_id', true), '')::uuid));
+CREATE POLICY p_chunks_update ON document_chunks FOR UPDATE TO rag_app
+  USING      (app_can_manage_chunk(document_id,
+                 NULLIF(current_setting('app.user_id', true), '')::uuid))
+  WITH CHECK (app_can_manage_chunk(document_id,
+                 NULLIF(current_setting('app.user_id', true), '')::uuid));
+CREATE POLICY p_chunks_delete ON document_chunks FOR DELETE TO rag_app
+  USING      (app_can_manage_chunk(document_id,
+                 NULLIF(current_setting('app.user_id', true), '')::uuid));
+```
+
+Tests (§11): ingest, replace and delete WORK as the app role with the right
+context; cross-audience writes FAIL (user B cannot insert/delete user A's
+private chunks; a plain member cannot write their group's chunks — editor
+only; nobody writes org chunks without the admin context). RLS write
+policies are DEFENSE IN DEPTH — the application never relies on them for
+its normal authorization (can_read/is_editor stay the app layer); they
+exist so a forgotten WHERE cannot corrupt another audience's chunks.
 
 ### 5.3 The user context, the pool, and fail-closed
 
 - `SET LOCAL app.user_id = '<uid>'` as the FIRST statement of every
-  transaction that touches documents/chunks (the search session of §2.3,
-  and any other content-reading session). `SET LOCAL` is transaction-
-  scoped: with the SHARED pool, a connection returning to the pool loses
-  the setting at commit — **no per-connection `SET`** (that would leak
-  identity across checkouts; the pool-discipline tests would catch it).
-- **Fail closed when the setting is missing:**
-  `current_setting('app.user_id', true)` returns NULL → `NULL::uuid` →
-  every comparison NULL → policy yields no rows. A session that forgot
-  SET LOCAL sees NOTHING from documents/document_chunks — it cannot
-  silently see everything.
+  transaction that touches document_chunks under a USER context (the
+  search session of §2.3, and any other content-touching session). With
+  the `ORG_ONLY` context the setting is simply NOT set — org rows are the
+  org-only path, by policy. `SET LOCAL` is transaction-scoped: with the
+  SHARED pool, a connection returning to the pool loses the setting at
+  commit — **no per-connection `SET`** (that would leak identity across
+  checkouts; the pool-discipline tests would catch it).
+- **Fail closed when the setting is missing (CORRECTED — PART 0 0.2):**
+  `current_setting('app.user_id', true)` returns NULL → `NULLIF(..., '')`
+  → NULL uuid → every user-dependent branch of the policy evaluates NULL
+  → the policy passes ONLY rows whose visibility does not depend on the
+  user at all: **the app sees ONLY org rows.** It cannot silently see
+  everything, and it cannot silently see another user's private or group
+  chunks — but "org-only" IS the degraded result, which is exactly why
+  ORG_ONLY is an honest, named context rather than an accident.
 - **Migrations vs policies:** Alembic runs as `rag_owner`, which BYPASSES
-  RLS on tables it owns unless `FORCE ROW LEVEL SECURITY` is set. Design:
-  **ENABLE without FORCE** — the app role is non-owner and fully filtered;
-  the owner bypass is exactly what backfills/re-embed jobs and the §A9.1
-  sweeps need (they touch private chunks by design, operator-initiated).
-  FORCE would break those jobs or force a policy bypass-flag, i.e. theater
-  with extra steps. The bypass surface is the owner credential, which the
-  app never holds. DECISION #2 records the alternative (FORCE + SD
-  functions for maintenance) if Farhad prefers the harder guarantee.
+  RLS on tables it owns unless `FORCE ROW LEVEL SECURITY` is set. Design
+  (Farhad's DECISION #2): **ENABLE without FORCE** — the app role is
+  non-owner and fully filtered; the owner bypass is exactly what backfills/
+  re-embed jobs and the §A9.1 sweeps need (they touch private chunks by
+  design, operator-initiated). FORCE would break those jobs or force a
+  policy bypass-flag, i.e. theater with extra steps. The bypass surface is
+  the owner credential, which the app never holds.
 
-### 5.4 Admin aggregates under RLS
+### 5.4 Admin aggregates (deferred with the documents policy)
 
-C4/D3 require private-document AGGREGATES (count + bytes, k≥5 suppression)
-while RLS hides private rows from the app role. Aggregation ≠ exposure:
-counts run through SECURITY DEFINER functions owned by `rag_owner` that
-return ONLY numbers — no names, no content:
+C4/D3 aggregates (private count + bytes, k≥5 suppression) run today against
+the `documents` table WITHOUT RLS (PART 0 0.3) — unchanged behavior. When
+RLS extends to `documents`, the aggregate queries must move to SECURITY
+DEFINER functions owned by `rag_owner` that return ONLY numbers — no
+names, no content:
 
 ```sql
-CREATE FUNCTION fn_admin_private_stats(uid uuid) RETURNS table(docs int, bytes bigint)
+CREATE FUNCTION fn_admin_private_stats(p_uid uuid)
+RETURNS table(docs int, bytes bigint)
   LANGUAGE sql SECURITY DEFINER STABLE SET search_path = public AS $$ ... $$;
 ```
 
 The API layer keeps the k≥5 suppression (unchanged admin listing code).
 This keeps "admins never see content or filenames of private documents"
-true at EVERY layer. Bypass-attempt tests (§11) include: an admin-context
-app-role session SELECTing private chunk rows gets ZERO rows; the SD
-functions return counts only.
+true at EVERY layer — that guarantee is part of the documents-RLS phase's
+review, not P4.
 
 ### 5.5 Bypass-attempt tests (mandated)
 
-1. rag_app, no SET LOCAL → documents/chunks invisible (fail-closed).
-2. rag_app, `RESET app.user_id` mid-transaction → rows vanish.
-3. rag_app, `SET ROLE rag_owner` → permission denied.
-4. rag_app, any DDL → denied.
-5. Admin-context session → private chunks still invisible; SD counter works.
-6. A user's chunk rows are invisible to a second user's SET LOCAL context.
+1. rag_app, no SET LOCAL → sees ONLY org chunks; private/group chunks
+   invisible (fail-closed, corrected semantics — PART 0 0.2).
+2. rag_app, `RESET app.user_id` mid-transaction → user context gone →
+   back to org-only; their private/group chunks vanish.
+3. **A member of group A CANNOT read group B's chunks** (the exact mandated
+   test — the 0.1 shadowing bug would have let every group member read
+   every group document; this test is what kills that class for good).
+4. rag_app, `SET ROLE rag_owner` → permission denied.
+5. rag_app, any DDL → denied.
+6. Write-policy matrix: ingest/replace/delete WORK as the app role with
+   the owner/editor/admin context; cross-audience writes FAIL (user B →
+   user A's private chunks; plain member → their group's chunks; anyone →
+   org chunks without the admin context).
+7. A user's chunk rows are invisible to a second user's SET LOCAL context.
 
 ---
 
@@ -458,13 +556,16 @@ functions return counts only.
   (search restricts to ONE model+version; §8 dual-read).
 - **Model/dimension change procedure (no switch in this task):**
   1. New column (`embedding_v2 vector(M)`) or twin table, per decision;
+     **if M > 2000 the column must be `halfvec(M)`** — the `vector` type
+     indexes only to 2000 dims (§4);
   2. Re-embed job reads ORIGINAL TEXT from `document_chunks.content`
      (chunks store their own text — no dependence on any external store),
      batches, writes the new column, bumps `embedding_version`;
   3. Dual-read period: search targets the new column once 100% of
      indexed chunks are migrated (per-document all-or-nothing — a document
      mixes versions only during its own re-embed, which is atomic);
-  4. Old column dropped after the parity harness (§8) passes.
+  4. Old column dropped after the golden-question gate (§8.2) passes on
+     the new column.
   The vector column is dimension-locked; nothing ever rewrites embeddings
   in place.
 
@@ -485,7 +586,8 @@ functions return counts only.
   that namespace — config.py:24 default is rag-v2). They migrate to
   NOTHING. Disposition is the operator's (DECISION #5): archive-and-freeze,
   or namespace-scoped delete (`delete(delete_all=True, namespace=...)` —
-  never `delete_index`) after the §8.3 cutover proves parity, or leave
+  never `delete_index`) after the §8.2 cutover passes the golden gate, or
+  leave
   frozen indefinitely. Listed, not decided here.
 - `multi-user-test` family: already 0 (A5.4 purge); per-run namespaces end
   with the Pinecone impl.
@@ -498,33 +600,37 @@ functions return counts only.
    setting.
 3. P3: Protocol + `PgVectorStore` (add/delete/search exact) + contract
    tests green against BOTH impls (§11) — Pinecone still the default.
-4. P4: RLS layer + bypass tests (§5).
-5. P5: seam switch (§2.3): state carries audiences; A14.8 suite green;
-   parity harness lands.
+4. P4: RLS layer (document_chunks) + bypass/write-policy tests (§5).
+5. P5: seam switch (§2.3): state carries the AccessContext; A14.8 suite
+   green.
 6. P6: backfill job (re-embed from uploads/; ~7 embeddings for the 2 real
-   docs; the SYNTHETIC benchmark corpus needs none) + **the parity gate**:
-   a fixed 20-question set run against OLD and NEW stores, top-k overlap
-   (Jaccard on doc_id sets, k=4) ≥ 0.75 per question AND citation titles
-   equal on ≥ 90%; results recorded in docs/evidence/pgvector-parity.md.
-   ⚠️ The old-store side needs Pinecone READS — **blocked until the cap
-   resets (2026-12-01) or a plan upgrade** (A5.4). Everything else in P1-P5
-   is local and unblocked.
-7. P7: cutover — `vector_store: "pgvector"` default flips AFTER the parity
-   gate passes; Pinecone code stays (rollback §8.3); A14.8 + contract
-   suites green both modes.
-8. P8: `copy_chunks`/`replace_document` land (Part B unblocked, §10).
+   docs; the SYNTHETIC benchmark corpus needs none) + **the golden-question
+   gate (Farhad's DECISION #10 — CHANGED from the draft's Pinecone-parity
+   gate)**: a fixed question set of AT LEAST 20 questions, each with its
+   EXPECTED SOURCE DOCUMENT known in advance, run against pgvector ALONE;
+   every question must retrieve its expected document in the top-k (top_k
+   = 4); results recorded in docs/evidence/pgvector-golden.md. **Parity
+   against Pinecone is optional and NOT a gate** — fully local, so P6 is
+   NOT blocked by the egress cap.
+7. P7: cutover — `vector_store: "pgvector"` default flips AFTER the
+   golden-question gate passes; Pinecone code stays (rollback §8.3); A14.8
+   + contract suites green both modes.
+8. P8: `copy_chunks`/`replace_document` land (Part B unblocked, §10) + the
+   orphan-files report-only CLI (§9, PART 0 0.5).
 9. P9: hybrid search arm (§6) behind OFF; evaluation optional/deferred.
-10. P10: **removal** — Pinecone adapter, `pinecone_*` settings,
-    requirements pins (pinecone, langchain-pinecone), .env.example/README
-    sweep, the transitional setting deleted, audit job re-run (the scanned
-    surface changes), namespace disposition executed (DECISION #5).
+10. P10 (immediately after P7 per DECISION #4): **removal** — Pinecone
+    adapter, `pinecone_*` settings, requirements pins (pinecone,
+    langchain-pinecone), .env.example/README sweep, the transitional
+    setting deleted, audit job re-run (the scanned surface changes),
+    namespace disposition executed (DECISION #5).
 
 ### 8.3 Rollback
 
 - Before P7: nothing to roll back (no behavior change; migration is
   additive).
 - At P7: flip the setting back; Pinecone data + code intact until P10.
-  The rollback window CLOSES at P10 by design (parity proven first).
+  The rollback window CLOSES at P10 by design (the golden gate passed
+  first).
 - After P10: rollback = git revert + re-embed from uploads/ into a fresh
   Pinecone namespace — possible as long as stored files exist (document
   deletes remove files; the corpus is re-derivable from git-tracked
@@ -580,6 +686,12 @@ functions return counts only.
   Part B swaps — autovacuum defaults suffice at our scale; monitor
   `pg_stat_user_tables.n_dead_tup` and bloat after the first version-swap
   exercise. No full-vacuum automation in this design.
+- **Orphan files (PART 0 0.5):** uploads whose process died between TX1
+  and TX2 (or any historical artifact) can leave `uploads/<doc_id>/`
+  directories with NO documents row. A REPORT-ONLY operator CLI
+  (`orphans-list`) lists them (directory name, file count, bytes) — it
+  NEVER deletes; disposition stays with the operator, exactly like the
+  800 root-owned `uploads/` entries reported in A5.5. Lands with P8.
 - **Monitoring:** `pg_stat_statements` (latency of the search query),
   `log_min_duration_statement` above search budget (150 ms), pool
   `checkedout()` already exposed in tests — a /api/health-adjacent metric
@@ -611,37 +723,48 @@ from columns instead of metadata hygiene.
 
 1. **Contract tests, both backends** (the §2 Protocol behaviors): add →
    metadata/ACL stamping; replace semantics; delete idempotent; search
-   audience matrix (org/group/private/archived-group/unknown-scope —
-   mirrors access.py:71-91 exactly); count_chunks; copy_chunks; empty-
-   audiences refusal (§A7 fail-closed, vectorstore.py:131-135). Run the
-   SAME suite against (a) the Pinecone adapter via the existing fakes
-   (offline, keyless) and (b) `PgVectorStore` against REAL Postgres
-   (`rag_test`, the pgvector image — offline in the "no external service"
-   sense). Inherits: test_documents_b4.py, test_ingest_ids.py,
-   test_access_resolver.py, test_retrieval_acl.py store-seam pins
-   (§1.2 table).
+   context matrix (ORG_ONLY / user in 0/1/2 groups / archived group /
+   unknown scope — mirrors access.py:71-91 exactly); count_chunks;
+   copy_chunks; missing-context refusal (§A7 fail-closed,
+   vectorstore.py:131-135). Run the SAME suite against (a) the Pinecone
+   adapter via the existing fakes (offline, keyless) and (b)
+   `PgVectorStore` against REAL Postgres (`rag_test`, the pgvector image —
+   offline in the "no external service" sense). Inherits:
+   test_documents_b4.py, test_ingest_ids.py, test_access_resolver.py,
+   test_retrieval_acl.py store-seam pins (§1.2 table).
 2. **A14.8 behavior suite** — runs unchanged (backend-agnostic by design,
-   docs/backend-design.md:1387); the two declared $in→token-list pin
+   docs/backend-design.md:1387); the two declared $in→AccessContext pin
    updates (§2.3) are strength-preserving and stated in the commit.
 3. **Recall + latency benchmark** — the §4 measurement plan on 100k
    synthetic vectors (1% / 10% / realistic filters), decision rule
    applied, recorded in docs/evidence/pgvector-benchmark.md. Generator is
    seeded/deterministic; runs in the test profile only (never CI-per-push
    — a manual evidence step).
-4. **RLS suite** — the §5.5 bypass attempts + the Python-vs-SQL parity
-   matrix (same doc/user fixtures through `can_read` AND the policy).
-5. **Pool discipline extended** — `checkedout()==0` after the graph run
+4. **RLS suite** — the §5.5 bypass attempts (incl. the MANDATED
+   group-A-member-cannot-read-group-B test and the write-policy matrix) +
+   the Python-vs-SQL parity matrix (same doc/user fixtures through
+   `can_read` AND the policy).
+5. **Golden-question suite** (DECISION #10) — ≥20 fixed questions, each
+   with a known expected source document, run against pgvector; every
+   question must retrieve its expected document in the top-k; recorded in
+   docs/evidence/pgvector-golden.md. This is the P7 CUTOVER GATE.
+   Pinecone parity is optional and not a gate.
+6. **Pool discipline extended** — `checkedout()==0` after the graph run
    INCLUDING a slow fake search (the §2.3 session-per-search discipline);
    the A5.1 upload probes unchanged.
-6. **Mutation targets** (after Part-A practice, scripts/mutation/):
-   M-V1 org token dropped from the search predicate; M-V2 owner compare
+7. **Mutation targets** (after Part-A practice, scripts/mutation/):
+   M-V1 org branch dropped from the read predicate; M-V2 owner compare
    inverted; M-V3 `g.is_active` dropped (archived group leaks — H13);
    M-V4 `status='indexed'` dropped (failed/deleting docs retrieve);
-   M-V5 SET LOCAL skipped (killed by bypass test 1); M-V6 copy_chunks
-   loses page/embedding columns (killed by contract test); M-V7
-   replace_document delete-before-insert (killed by transaction-boundary
-   test); M-V8 parity threshold weakened (killed by the harness's own
-   red-run). All live checks run against LOCAL Postgres only.
+   M-V5 SET LOCAL skipped (killed by bypass test 1); M-V6 RLS parameter
+   shadowing reintroduced (`p_group_id` → `group_id` — killed by the
+   group-A/B test, the exact regression that motivated PART 0 0.1);
+   M-V7 write policy WITH CHECK dropped (killed by the cross-audience
+   write tests); M-V8 copy_chunks loses page/embedding columns (killed by
+   contract test); M-V9 replace_document delete-before-insert (killed by
+   the transaction-boundary test); M-V10 golden-gate threshold weakened
+   (killed by the gate's own red-run). All live checks run against LOCAL
+   Postgres only.
 
 ---
 
@@ -655,14 +778,14 @@ from columns instead of metadata hygiene.
 - **RLS misconfiguration silently hiding data** — a bad policy reads as
   "no results" for everyone. Counter: fail-closed is the DESIGN (§5.3),
   the bypass suite proves both directions (no context → nothing; user
-  context → exactly their audience), and the parity harness (§8.2 P6)
+  context → exactly their audience), and the golden-question gate (§8.2 P6)
   catches pre-cutover.
 - **Python vs SQL access drift** — `can_read` (listings) vs the policy.
   Counter: one predicate function (§5.2) + the parity matrix test (§11.4).
 - **Search-in-graph changes pool behavior** — counter: session-per-search
   + extended pool tests (§2.3, §11.5).
-- **Migration correctness** — counter: additive migration, parity GATE
-  before cutover, rollback window until P10 (§8.3).
+- **Migration correctness** — counter: additive migration, the
+  golden-question GATE before cutover, rollback window until P10 (§8.3).
 - **1M-chunk future** — sizing §9; the §4 rule triggers the index when
   real data makes it matter.
 - **Backups grow** — chunk content doubles stored bytes vs documents-only;
@@ -684,68 +807,47 @@ threshold. Keeping Pinecone is not an alternative — the task's premise
 
 | Phase | Commit subject (planned) | Contents | Checkpoint |
 |---|---|---|---|
-| P1 | feat(pgvector/p1): pgvector image + roles in compose and CI | §8.2 step 1, zero app change | suite green both modes |
+| P1 | feat(pgvector/p1): pgvector image + roles in compose and CI | §8.2 step 1, zero app change; task file docs/tasks/pgvector-p1.md PART 1 | suite green both modes |
 | P2 | feat(pgvector/p2): migration 0006 document_chunks | §3, settings, schema tests first | **Farhad reviews schema** |
 | P3 | feat(pgvector/p3): VectorStore Protocol + PgVectorStore (exact) | §2, contract tests both backends, Pinecone still default | suite green |
-| P4 | feat(pgvector/p4): RLS layer | §5, bypass suite | **Farhad reviews RLS** |
-| P5 | feat(pgvector/p5): seam switch (audiences in state) | §2.3, A14.8 green, declared pin changes | suite green both modes |
-| P6 | feat(pgvector/p6): backfill + parity harness | §8.2 step 6 — ⚠️ parity GATE needs Pinecone reads: blocked until 2026-12-01 or plan upgrade (Farhad's call, already pending from A5.4) | **Farhad reviews parity report** |
+| P4 | feat(pgvector/p4): RLS layer (document_chunks) | §5, bypass + write-policy suites | **Farhad reviews RLS** |
+| P5 | feat(pgvector/p5): seam switch (AccessContext in state) | §2.3, A14.8 green, declared pin changes | suite green both modes |
+| P6 | feat(pgvector/p6): backfill + golden-question gate | §8.2 step 6 — fully LOCAL (Pinecone parity optional, not a gate — DECISION #10): NOT blocked by the egress cap | **Farhad reviews the golden report** |
 | P7 | feat(pgvector/p7): cutover default → pgvector | flip setting; A9.1 machinery removal (§8.4); both modes green | **Farhad approves cutover** |
-| P8 | feat(pgvector/p8): copy/replace Protocol ops | §10 Part B unblock | suite green |
+| P8 | feat(pgvector/p8): copy/replace ops + orphan-list CLI | §10 Part B unblock; §9 orphan CLI (report-only) | suite green |
 | P9 | feat(pgvector/p9): hybrid search OFF + evaluation harness | §6 | optional |
-| P10 | feat(pgvector/p10): Pinecone removal | adapter, settings, pins, docs sweep, audit re-run, namespace disposition (DECISION #5) | audit job green |
+| P10 | feat(pgvector/p10): Pinecone removal (immediately after P7 — DECISION #4) | adapter, settings, pins, docs sweep, audit re-run, namespace disposition (DECISION #5) | audit job green |
 
-### 12.4 DECISIONS FOR FARHAD
+### 12.4 DECISIONS — CLOSED by Farhad 2026-11-23 (docs/tasks/pgvector-p1.md)
 
-1. **Access derivation** — derived-at-query via join (recommended;
-   §3) vs denormalized read_access tokens on chunks. Recommendation:
-   derived — always-consistent with can_read, zero rewrite machinery;
-   the G1.2 "revoke applies to the next request" invariant is preserved
-   for free.
-2. **RLS strength** — ENABLE + non-owner app role, owner bypass reserved
-   for migrations/backfills (recommended; §5.3) vs FORCE + SECURITY
-   DEFINER maintenance path. Recommendation: ENABLE — simpler, the app
-   credential can never bypass, and the owner bypass is exactly the
-   maintenance surface that needs it.
-3. **Seam shape** — Protocol consumes the audience TOKEN LIST (recommended;
-   §2.1) vs keeping the Pinecone `$in` dict end-to-end. Recommendation:
-   token list — the dict is Pinecone's rendering, and carrying it into
-   SQL means parsing a vendor dialect forever. Cost: two declared,
-   strength-preserving pin updates (§2.3).
-4. **Transitional `vector_store` setting** — allowed as a MIGRATION DEVICE
-   with a mandated removal commit (P10) — recommendation — vs big-bang
-   switch with no dual-impl period. It touches the no-AUTH_MODE-flag rule
-   in spirit; the difference (a parity-gated, dated, removal-committed
-   device vs a permanent mode) is stated here for sign-off.
-5. **27 legacy vectors + rag-v2 namespace** — recommendation: migrate
-   NOTHING from the legacy namespace (no documents rows, no readers since
-   B4); re-embed the 2 rag-v2 org docs from `data/sample_kb/` (≈5
-   embeddings); after P10 parity, the legacy namespace and rag-v2 are
-   deleted namespace-scoped (operator-executed, `delete_all` on the
-   namespace, never `delete_index`). Alternative: freeze them untouched.
-6. **Exact-first** (recommended; §4) vs shipping HNSW immediately.
-   Recommendation: exact — perfect recall, zero tuning, and the real
-   corpus is 5 docs today; the benchmark decides when HNSW earns its
-   complexity.
-7. **Embeddings** — keep `text-embedding-3-small` (1536) for the cutover
-   (recommended); base_url/model/dimensions in settings; self-hosted
-   candidates (BGE-M3, Qwen3-Embedding) parked with license-check TODO.
-   No model switch in this task (mandate).
-8. **Hybrid search** — OFF until an nDCG evaluation shows a gain
-   (recommended; §6) vs shipping fused ranking now. Recommendation: OFF —
-   our retrieval failure mode today is insufficient KB depth, not ranking
-   order; measure first.
-9. **A9.1 machinery removal timing** — remove `deleting` status, sweeps
-   and the CLI AT the P7 cutover (recommended; §8.4) vs keeping one phase
-   for the Pinecone rollback window. Recommendation: remove at P7 — the
-   sweep exists ONLY for external-store outages; keeping it during the
-   dual-impl window for the Pinecone side is harmless but the pgvector
-   path must never route through it (its tests would then pin a dead
-   protocol).
-10. **Parity gate shape** — hard gate in the cutover (P7 refuses without
-    the recorded parity report, recommendation) vs advisory report only.
-    Recommendation: hard gate — "never weaken a check to make it pass"
-    applies to the biggest data move this project will make.
+1. **Access derivation** — **DECIDED: derived access** (§3).
+2. **RLS strength** — **DECIDED: ENABLE RLS without FORCE** (§5.3).
+3. **Seam shape** — **DECIDED: AccessContext** (user_id or ORG_ONLY) —
+   NOT a token list, NOT the Pinecone `$in` dict; the Pinecone adapter
+   builds its own tokens via the resolver; LangGraph state carries the
+   AccessContext (§2.1/§2.3). PART 0 0.4 applied throughout.
+4. **Transitional `vector_store` setting** — **DECIDED: accepted**, with
+   P10 immediately after P7 (no lingering dual-impl period).
+5. **27 legacy vectors + rag-v2 namespace** — **DECIDED: migrate nothing**
+   from legacy namespaces (§8.1); disposition stays operator-owned.
+6. **Exact-first** — **DECIDED** (§4).
+7. **Embeddings** — **DECIDED: keep text-embedding-3-small** (§7); no
+   model switch in this task.
+8. **Hybrid search** — **DECIDED: OFF** until an evaluation wins (§6).
+9. **A9.1 machinery removal timing** — **DECIDED: remove at P7** (§8.4).
+10. **Cutover gate** — **CHANGED by Farhad**: the gate is a
+    **golden-question check against pgvector ALONE** — expected source
+    document known for each question, ≥20 questions, recorded in
+    docs/evidence/pgvector-golden.md; parity against Pinecone is optional
+    and NOT a gate. (The draft's Pinecone-parity gate and its 2026-12-01
+    read-cap dependency are GONE — §8.2 step 6 is fully local.)
+
+Design-quality amendments from Farhad's PART 0 review (applied): 0.1 RLS
+function parameter shadowing (distinct `p_` names; STABLE; SECURITY
+INVOKER; NULLIF unwrap), 0.2 fail-closed corrected to ORG-ONLY + the
+mandated group-A/B bypass test, 0.3 RLS scoped to document_chunks with
+explicit write policies, 0.5 the orphan-files report-only CLI, 0.6 the
+2000-dimension HNSW ceiling of the `vector` type.
 
 ---
 
