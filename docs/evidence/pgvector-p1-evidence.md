@@ -113,4 +113,6 @@ CI on this commit must show `test` green with the pgvector service image
 + the bootstrap step, `sast` unchanged, `audit` unchanged (requirements
 untouched in P1). Result recorded below once confirmed:
 
-- run on this commit: (polling — recorded in PROGRESS.md on confirmation)
+- run on this commit: **45141247806 (ffe04e8) — test success, sast success,
+  audit success** (confirmed 2026-11-23; the test job ran against the
+  pgvector/pgvector:pg18 service with the bootstrap-existing.sql step).

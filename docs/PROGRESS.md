@@ -479,3 +479,7 @@ no volume deletes, zero Pinecone.
 
 pgvector P2 (migration 0006 document_chunks) ONLY on Farhad's review of P1
 + the PART 0 amendments. STOP now — the task says STOP after PART 1.
+
+CI confirmed: run 45141247806 on ffe04e8 — **test success, sast success,
+audit success** (test job on the pgvector/pgvector:pg18 service with the
+bootstrap-existing.sql step; evidence §CI updated).
