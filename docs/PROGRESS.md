@@ -495,3 +495,6 @@ bootstrap-existing.sql step; evidence §CI updated).
 pgvector P3 (VectorStore Protocol + PgVectorStore exact-search + contract
 tests on BOTH backends, Pinecone still default) ONLY on Farhad's review of
 P2. STOP now — checkpoint: "Farhad reviews schema".
+
+CI confirmed on the P2 commit: **test success, sast success, audit success**
+(evidence §CI updated).
