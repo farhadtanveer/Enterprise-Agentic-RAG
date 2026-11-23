@@ -430,3 +430,15 @@ citations) is his explicit go/no-go.
 | Step | Commit | Proven by |
 |---|---|---|
 | A5.8 opentelemetry-api 1.45.1 → 1.45.2 (CVE-2026-126360 / GHSA-mf5v-w3w3-f6cg; ONE advisory, fix exists on PyPI, no ignore flags) | (this commit) | pip-audit in the rebuilt image: "No known vulnerabilities found"; suite 409/0 compose AND CI-mode; no-root-files.sh PASS; CI run on this commit green (audit+test+sast). Evidence: docs/evidence/g2a5-evidence.md §A5.8. |
+
+CI confirmed: run 45130905445 on ad7adc7 — **audit success, test success,
+sast success**. First green audit since run 75.
+
+A5 is now fully closed including CI. Final report: **docs/review/a5-final-report.md**
+(A5.1–A5.8 deliverables + evidence paths + the four open items for Farhad).
+
+## EXACT NEXT STEP
+
+**PART A5 COMPLETE and CI green — STOP and report to Farhad.** Wait for his
+review of A5 and his PART B go/no-go (docs/tasks/g2.md session 2). Pinecone
+read-side checks stay PENDING until 2026-12-01 or a plan upgrade (his call).
