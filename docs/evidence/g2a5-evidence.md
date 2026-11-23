@@ -527,3 +527,70 @@ verdict:  PASS
 ```
 verdict: PASS
 ```
+
+## A5.8 — CVE fix: opentelemetry-api 1.45.1 → 1.45.2 (2026-11-23, resume session)
+
+The CI `audit` job (pip-audit==2.10.1, `pip-audit -r requirements.txt`)
+failed on the last three commits (runs 76–78; `test` and `sast` passed).
+MANDATE: bump ONLY the vulnerable pins to the fixed versions; no ignore
+flags.
+
+**The advisory (identical in all three failing runs):**
+
+```
+command:  pip-audit -r requirements.txt   (CI job "audit", run 78 = d8f6504)
+expected: no known vulnerabilities
+actual:   Found 1 known vulnerability in 1 package
+          Name              Version  ID               Fix Versions
+          opentelemetry-api 1.45.1   CVE-2026-126360  1.45.2
+verdict:  FAIL (the red gate this step fixes)
+```
+
+Cross-checked against OSV (api.osv.dev/v1/query, PyPI opentelemetry-api
+1.45.1): exactly one vuln — **GHSA-mf5v-w3w3-f6cg** (alias
+CVE-2026-126360), affected range `introduced: 0 → fixed: 1.45.2`.
+The fix version EXISTS on PyPI (1.45.2, uploaded 2026-10-29, is also the
+latest release). No suppression/ignore used.
+
+**The fix (one line, nothing else):**
+
+```
+diff requirements.txt:  -opentelemetry-api==1.45.1
+                        +opentelemetry-api==1.45.2
+```
+
+opentelemetry-api is a TRANSITIVE dependency (langchain-core/langsmith
+chain), not imported by app/ — grep over the repo: only requirements.txt
+mentions it. Patch-level bump, SemVer-compatible; no behavior change
+expected (and none observed: suite counts identical below).
+
+**Executed evidence after the bump:**
+
+```
+command:  docker compose run --rm app python -m pip install pip-audit==2.10.1 \
+            && python -m pip_audit -r requirements.txt
+          (disposable appuser container off the REBUILT image)
+expected: No known vulnerabilities found
+actual:   No known vulnerabilities found
+verdict:  PASS
+command:  docker compose --profile app build app
+expected: image rebuilds with the new pin
+actual:   Built (enterprise-agentic-rag-app)
+verdict:  PASS
+command:  docker compose --profile test run --rm test
+expected: 409 passed / 0 failed (matches the A5.7 baseline)
+actual:   409 passed, 3 warnings in 250.39s
+verdict:  PASS
+command:  docker compose --profile test run --rm -e ENABLE_WEB_FALLBACK=false test
+expected: 409 passed / 0 failed (CI mode)
+actual:   409 passed, 3 warnings in 206.31s
+verdict:  PASS
+command:  bash scripts/verify/no-root-files.sh
+expected: PASS (A5.5 check unregressed by the rebuild)
+actual:   PASS: no root-owned container-created files in the source tree
+          (INFO: 800 historical uploads/ entries — reported only, unchanged)
+verdict:  PASS
+```
+
+CI after push: run on this commit must show `audit`, `test`, `sast` all
+green (recorded in PROGRESS.md once confirmed).

@@ -424,3 +424,9 @@ STOP and report to Farhad.** Pinecone reads capped until 2026-12-01 (or a
 plan upgrade): g2a's 5 blocked checks + b4/b5/b6/g1 live re-runs recorded
 as PENDING in the evidence. PART B (share flow, versions, governance,
 citations) is his explicit go/no-go.
+
+## 2026-11-23 — A5.8 CVE fix (resume session; audit job was red on 76–78)
+
+| Step | Commit | Proven by |
+|---|---|---|
+| A5.8 opentelemetry-api 1.45.1 → 1.45.2 (CVE-2026-126360 / GHSA-mf5v-w3w3-f6cg; ONE advisory, fix exists on PyPI, no ignore flags) | (this commit) | pip-audit in the rebuilt image: "No known vulnerabilities found"; suite 409/0 compose AND CI-mode; no-root-files.sh PASS; CI run on this commit green (audit+test+sast). Evidence: docs/evidence/g2a5-evidence.md §A5.8. |
