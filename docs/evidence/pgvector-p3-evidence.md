@@ -131,4 +131,4 @@ verdict:  PASS
 
 ## CI
 
-- run on this commit: (polling — recorded in PROGRESS.md on confirmation)
+- run on this commit: **confirmed — test success, sast success, audit success** (recorded in PROGRESS.md 2026-11-23)

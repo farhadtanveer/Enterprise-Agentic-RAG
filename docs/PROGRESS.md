@@ -509,3 +509,6 @@ CI confirmed on the P2 commit: **test success, sast success, audit success**
 
 pgvector P4 (RLS on document_chunks: policies + rag_app switch preparation +
 bypass/write-policy suites) ONLY on Farhad's review of P3. STOP now.
+
+CI confirmed on the P3 commit (4fcda8d): **test success, sast success,
+audit success** (evidence §CI updated).
