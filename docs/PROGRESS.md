@@ -468,3 +468,14 @@ recovers (2026-12-01) or a plan upgrade; P1–P5 are fully local.
 pgvector PART 1 (docs/tasks/pgvector-p1.md): P1 image swap + initdb roles +
 runbook + extension test + evidence, one commit, no app behavior change,
 no volume deletes, zero Pinecone.
+
+## 2026-11-23 — pgvector P1 complete (docs/tasks/pgvector-p1.md PART 1)
+
+| Step | Commit | Proven by |
+|---|---|---|
+| P1 image swap: compose db + CI test service → **pgvector/pgvector:pg18** (digest sha256:38681dc6…39782); NEW named volume `pgdata_pgvector` (old `pgdata` unreferenced, NEVER deleted — rollback = revert compose); docker/initdb gains 02-pgvector.sql (extension, fresh volumes) + 03-roles.sh (rag_owner/rag_app, passwords from env, empty-tolerant, baseline grants only); scripts/sql/bootstrap-existing.sql (idempotent, operator+CI path for an EXISTING cluster); docs/db-image-swap.md runbook (dump→new volume→restore→collation check→REINDEX fallback→rollback, operator performs the move); .env.example role-password rows; tests/test_pgvector_extension.py (extension exists + ≥0.8.0) | (this commit) | Fresh-volume path proven LIVE on a tmpfs throwaway over the compose network (operator's pgdata untouched): extension **0.8.7** in rag AND rag_test, both roles LOGIN, PostgreSQL 18.7 (Debian), collation en_US.utf8; suite **411 passed / 0 failed** compose-mode AND CI-mode (409 + 2 new); no-root-files.sh PASS; throwaway removed (`docker rm -f`, zero volumes touched). Evidence: docs/evidence/pgvector-p1-evidence.md; runbook: docs/db-image-swap.md. CI run green (recorded below on confirmation). |
+
+## EXACT NEXT STEP
+
+pgvector P2 (migration 0006 document_chunks) ONLY on Farhad's review of P1
++ the PART 0 amendments. STOP now — the task says STOP after PART 1.

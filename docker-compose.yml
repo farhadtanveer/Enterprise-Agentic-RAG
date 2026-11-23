@@ -1,6 +1,12 @@
 services:
   db:
-    image: postgres:18-alpine
+    # P1 (docs/tasks/pgvector-p1.md): pgvector/pgvector:pg18 — official
+    # PG18 + the pgvector extension (the image's digest is recorded in
+    # docs/evidence/pgvector-p1-evidence.md). Alpine→Debian collations
+    # differ: do NOT start this image on the old pgdata volume — follow
+    # docs/db-image-swap.md (pg_dump → NEW named volume → restore; the
+    # old volume is never deleted, that is the rollback).
+    image: pgvector/pgvector:pg18
     environment:
       # Interpolated from the project .env (compose reads it automatically).
       # POSTGRES_PASSWORD is REQUIRED (no fallback): a silent default invites
@@ -11,6 +17,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-rag}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (see .env.example)}
       POSTGRES_DB: ${POSTGRES_DB:-rag}
+      # pgvector roles (P1: created on first init by docker/initdb/02-roles.sh;
+      # USED from P4 when DATABASE_URL/ALEMBIC_DATABASE_URL switch — until
+      # then they exist unused, so an empty value is acceptable in dev but
+      # must be set before P4). Never stored in the repo.
+      RAG_OWNER_PASSWORD: ${RAG_OWNER_PASSWORD:-}
+      RAG_APP_PASSWORD: ${RAG_APP_PASSWORD:-}
     # NO host port publish on purpose: this Docker Desktop build stalls
     # loopback publishes (~130 s per query) and a bare binding would expose
     # the dev DB to the LAN. Everything needing the DB — tests, Alembic,
@@ -20,8 +32,12 @@ services:
     volumes:
       # PG18 image layout: mount the parent dir; data lands in 18/docker/,
       # leaving room for pg_upgrade of future major versions.
-      - pgdata:/var/lib/postgresql
-      # Creates the companion rag_test database used by the test suite.
+      # P1: NEW named volume (pgvector image on the old Alpine-initdb'd
+      # volume is a collation mismatch — docs/db-image-swap.md). The OLD
+      # pgdata volume is NOT deleted: revert this file to roll back to it.
+      - pgdata_pgvector:/var/lib/postgresql
+      # Creates the companion rag_test database used by the test suite, the
+      # vector extension, and the rag_owner/rag_app roles.
       - ./docker/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
@@ -97,4 +113,8 @@ services:
     command: ["python", "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider"]
 
 volumes:
-  pgdata:
+  # P1 (docs/db-image-swap.md): the NEW volume for the pgvector image.
+  # The previous `pgdata` volume is deliberately UNREFERENCED — never
+  # deleted by any command in this repo; it holds the pre-swap dev data
+  # and is the rollback target.
+  pgdata_pgvector:

@@ -9,7 +9,11 @@ jobs:
     # uuidv7 must behave exactly as deployed; docs/dev-testing.md).
     services:
       postgres:
-        image: postgres:18-alpine
+        # P1 (docs/tasks/pgvector-p1.md): official PG18 + the pgvector
+        # extension. Alpine→Debian collations differ — CI boots a FRESH
+        # cluster every run, so no dump/restore path applies here (that is
+        # the operator's docs/db-image-swap.md concern only).
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_USER: rag
           POSTGRES_PASSWORD: rag
@@ -25,6 +29,19 @@ jobs:
       TEST_DATABASE_URL: postgresql+psycopg://rag:rag@localhost:5433/rag_test
     steps:
       - uses: actions/checkout@v4
+      # P1: CI boots a fresh cluster with NO initdb mount (Actions services
+      # cannot mount files), so the extension + roles come from the SAME
+      # idempotent file the operator uses (scripts/sql/
+      # bootstrap-existing.sql — docs/db-image-swap.md, no drift). The
+      # password values are CI-throwaway creds for a container that dies
+      # with the job (same posture as POSTGRES_PASSWORD: rag above); the
+      # roles stay UNUSED until P4.
+      - name: Bootstrap pgvector extension + roles (bootstrap-existing.sql)
+        run: >
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client &&
+          PGPASSWORD=rag psql -h localhost -p 5433 -U rag -d rag_test
+          -v ON_ERROR_STOP=1 -v owner_pw=ci-throwaway -v app_pw=ci-throwaway
+          -f scripts/sql/bootstrap-existing.sql
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
