@@ -498,3 +498,14 @@ P2. STOP now — checkpoint: "Farhad reviews schema".
 
 CI confirmed on the P2 commit: **test success, sast success, audit success**
 (evidence §CI updated).
+
+## 2026-11-23 — pgvector P3 complete (VectorStore Protocol + PgVectorStore, both-backend contract)
+
+| Step | Commit | Proven by |
+|---|---|---|
+| P3: app/rag/vector_backend.py (runtime_checkable VectorStore Protocol; PineconeVectorStoreAdapter wrapping the existing functions verbatim, tokens via the resolver, copy/count = DECLARED NotImplementedError — no Pinecone primitive, reads cap-blocked; PgVectorStore exact KNN with the derived access predicate, own short session per op, injectable lazy embedder, ONE-transaction replace, INSERT…SELECT copy; get_vector_store_backend factory) + AccessContext/ORG_ONLY in access.py (DECISION #3) + vector_store/embedding_dimensions settings with production readers + conftest H8 pins + 27-test both-backend contract suite (RED first: 26 collection errors; GREEN-phase failures were test-side: split-session commit in the copy test, count-based assertions impossible on the Pinecone leg → search-based + declared gaps) | (this commit) | Contract suite **27 passed / 3 declared skips** — SAME fixtures + resolver on BOTH legs = the first Python-vs-SQL parity matrix: ORG_ONLY⇒org-only, 1-group⇒org+own+that group, archived-group⇒nobody (H13), membership-revoke⇒next-search (parity), replace/delete idempotence, missing-context refusal, k truncation, copy carries embeddings (pg), FK refusal (pg), metadata contract (pg: page+created_at). Settings effects proven (factory selection + dimension gate). Full suite **450 passed / 3 skipped** compose AND CI-mode; no-root PASS. Pinecone stays the default; NO caller rewired (P5). Evidence: docs/evidence/pgvector-p3-evidence.md. |
+
+## EXACT NEXT STEP
+
+pgvector P4 (RLS on document_chunks: policies + rag_app switch preparation +
+bypass/write-policy suites) ONLY on Farhad's review of P3. STOP now.

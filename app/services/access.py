@@ -13,6 +13,7 @@ the session row, never snapshotted at login — so a grant, revoke, disable
 or archive applies to the user's very next request (proven by
 tests/security/test_access_resolver.py).
 """
+from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
@@ -22,6 +23,31 @@ from sqlalchemy.orm import Session as DBSession
 from app.models.document import Document
 from app.models.group import Group, GroupMembership
 from app.models.user import User
+
+
+@dataclass(frozen=True)
+class AccessContext:
+    """Who is asking — the backend-agnostic access seam (pgvector P3,
+    DECISION #3, docs/pgvector-design.md §2.1). Exactly two shapes:
+
+    - ``AccessContext(user=<uuid>)`` — an authenticated user; retrieval and
+      (from P4) RLS run in THEIR identity: the SQL predicate derives
+      audiences from the live memberships, the Pinecone adapter renders its
+      prefixed tokens via the resolver, and the search session sets
+      ``app.user_id`` from it.
+    - ``ORG_ONLY`` (the module constant, ``user=None``) — legacy /api/chat
+      (D8) and any future context-free path see ONLY org rows: the
+      corrected fail-closed semantics (PART 0 0.2 — without a user every
+      user-dependent branch of the access predicate evaluates NULL).
+
+    Nothing Pinecone-shaped (no $in dict) and no token list crosses this
+    seam — the backend renders its own representation.
+    """
+
+    user: UUID | None
+
+
+ORG_ONLY = AccessContext(user=None)
 
 
 class AccessResolver(Protocol):

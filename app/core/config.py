@@ -22,6 +22,20 @@ class Settings(BaseSettings):
     # the old namespace is left 100% untouched until the operator clears it
     # AFTER verifying re-ingest (manual, namespace-scoped only).
     pinecone_namespace: str = "rag-v2"
+    # --- pgvector migration (docs/pgvector-design.md §2.2/§3; DECISIONS
+    # #4/#7) ---
+    # Transitional backend selector (P3–P7): "pinecone" stays the default
+    # until the golden-question gate passes; "pgvector" switches the store
+    # (P7 cutover). The Pinecone adapter, this setting and the $in dict all
+    # die at P10 — a migration device with a mandated removal commit, not a
+    # permanent mode.
+    vector_store: str = "pinecone"
+    # The embedding dimension the document_chunks column was created with
+    # (migration 0006 wrote the same literal; text-embedding-3-small,
+    # DECISION #7). The PgVectorStore refuses to store or query a vector
+    # whose dimension differs — a model change needs the §7 dual-column
+    # procedure, never a silent dimension drift.
+    embedding_dimensions: int = 1536
     embedding_model: str = "text-embedding-3-small"
     openai_model: str = "gpt-4o-mini"
     top_k: int = 4

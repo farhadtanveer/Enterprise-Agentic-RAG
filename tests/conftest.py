@@ -37,6 +37,11 @@ os.environ["MAX_UPLOAD_MB"] = "25"
 os.environ["MAX_MESSAGE_LENGTH"] = "3000"
 os.environ["MAX_MESSAGES_PER_CONVERSATION"] = "200"
 os.environ["MAX_CONVERSATIONS_PER_USER"] = "100"
+# pgvector P3 pins (code defaults): the transitional backend selector and
+# the column dimension (migration 0006's literal) — the contract suite
+# asserts BOTH, so a developer .env must never move them.
+os.environ["VECTOR_STORE"] = "pinecone"
+os.environ["EMBEDDING_DIMENSIONS"] = "1536"
 
 import pytest
 from pathlib import Path
